@@ -46,12 +46,17 @@ type Buddy struct {
 }
 
 type Me struct {
-	Name      string
-	UsedIVs   []string
-	SecretKey [32]byte
-	PublicKey [32]byte
-	SentKey   bool
-	Buddies   map[string]*Buddy
+	Name            string
+	UsedIVs         []string
+	SecretKey       [32]byte
+	PublicKey       [32]byte
+	SentKey         bool
+	Buddies         map[string]*Buddy
+	sendmsg         chan sendMessageRequest
+	recvmsg         chan recvMessageRequest
+	destroyuser     chan string
+	saveprofile     chan chan string
+	fingerprintuser chan fingerprintUserRequest
 }
 
 func Sha512(input []byte) []byte {
@@ -104,7 +109,7 @@ func HMAC(msg, key []byte) string {
 	return base64.StdEncoding.EncodeToString(mac.Sum(nil))
 }
 
-func (me *Me) SendMessage(message []byte) string {
+func (me *Me) sendMessage(message []byte) string {
 	buf := make([]byte, 64)
 	rand.Read(buf)
 	message = append(message, buf...)
@@ -163,7 +168,7 @@ func (me *Me) SendMessage(message []byte) string {
 	return string(str)
 }
 
-func (me *Me) ReceiveMessage(sender string, message string) ([]byte, error) {
+func (me *Me) receiveMessage(sender string, message string) ([]byte, error) {
 	var m Answer
 	err := json.Unmarshal([]byte(message), &m)
 	if err != nil {
@@ -241,9 +246,15 @@ func (me *Me) ReceiveMessage(sender string, message string) ([]byte, error) {
 
 			for _, v := range sortedRecipients {
 				if !IsElem(v, missingrecipients) {
-					mby, _ := base64.StdEncoding.DecodeString(m.Text[v].Message)
+					mby, err := base64.StdEncoding.DecodeString(m.Text[v].Message)
+					if err != nil {
+						return nil, err
+					}
 					bhmac = append(bhmac, mby...)
-					ivby, _ := base64.StdEncoding.DecodeString(m.Text[v].IV)
+					ivby, err := base64.StdEncoding.DecodeString(m.Text[v].IV)
+					if err != nil {
+						return nil, err
+					}
 					bhmac = append(bhmac, ivby...)
 				}
 			}
@@ -297,6 +308,24 @@ func (me *Me) genFingerprint(nick string) string {
 	fps := hex.EncodeToString(fp)
 	fps = strings.ToUpper(fps)
 	return fps[:40]
+}
+
+func fpspace(key string) string {
+	str := []rune(key)
+
+	if len(str) != 40 {
+		return "bad key"
+	}
+
+	formatted := []rune{}
+	for i, c := range str {
+		if i != 0 && i%8 == 0 {
+			formatted = append(formatted, rune(' '))
+		}
+		formatted = append(formatted, c)
+	}
+
+	return string(formatted)
 }
 
 func (me *Me) genSharedSecret(nick string) *MPStorage {
@@ -361,10 +390,123 @@ func decryptAES(msg string, key []byte, iv []byte) []byte {
 	return plaintext
 }
 
-func NewMe(username string) *Me {
+type recvMessageRequest struct {
+	Sender, Message string
+	Response        chan recvMessageResponse
+}
+
+type recvMessageResponse struct {
+	Text []byte
+	Err  error
+}
+
+type sendMessageRequest struct {
+	Message  []byte
+	Response chan string
+}
+
+type fingerprintUserRequest struct {
+	Name     string
+	Response chan string
+}
+
+func NewMe(username string, profile string) (*Me, error) {
 	me := &Me{}
 	me.Name = username
 	me.Buddies = make(map[string]*Buddy)
-	me.GenerateKeys()
-	return me
+
+	if profile != "" {
+		b, err := base64.StdEncoding.DecodeString(profile)
+		if err != nil {
+			return nil, err
+		}
+
+		copy(me.SecretKey[:], b)
+		curve25519.ScalarBaseMult(&me.PublicKey, &me.SecretKey)
+	} else {
+		me.GenerateKeys()
+	}
+
+	me.recvmsg = make(chan recvMessageRequest)
+	me.sendmsg = make(chan sendMessageRequest)
+	me.fingerprintuser = make(chan fingerprintUserRequest)
+	me.saveprofile = make(chan chan string)
+	// Enforce mutually exclusive access
+	go func() {
+		for {
+			select {
+			case req := <-me.recvmsg:
+				msg, err := me.receiveMessage(req.Sender, req.Message)
+				req.Response <- recvMessageResponse{
+					Text: msg, Err: err,
+				}
+			case send := <-me.sendmsg:
+				send.Response <- me.sendMessage(send.Message)
+
+			case user := <-me.destroyuser:
+				delete(me.Buddies, user)
+			case req := <-me.fingerprintuser:
+				if me.Buddies[req.Name] == nil {
+					req.Response <- "err"
+				} else {
+					fp := me.genFingerprint(req.Name)
+					req.Response <- fpspace(fp)
+				}
+			case save := <-me.saveprofile:
+				save <- me.saveProfile()
+			}
+		}
+	}()
+
+	return me, nil
+}
+
+func (me *Me) ReceiveMessage(sender, message string) ([]byte, error) {
+	response := make(chan recvMessageResponse)
+	me.recvmsg <- recvMessageRequest{
+		Sender:   sender,
+		Message:  message,
+		Response: response,
+	}
+
+	resp := <-response
+	return resp.Text, resp.Err
+}
+
+func (me *Me) SendMessage(message []byte) string {
+	response := make(chan string)
+	me.sendmsg <- sendMessageRequest{
+		Message: message, Response: response,
+	}
+
+	return <-response
+}
+
+func (me *Me) DestroyUser(name string) {
+	me.destroyuser <- name
+}
+
+func (me *Me) saveProfile() string {
+	return base64.StdEncoding.EncodeToString(me.SecretKey[:])
+}
+
+func (me *Me) SaveProfile() string {
+	b := make(chan string)
+	me.saveprofile <- b
+	return <-b
+}
+
+func (me *Me) FingerprintUser(username string) (string, error) {
+	resp := make(chan string)
+	me.fingerprintuser <- fingerprintUserRequest{
+		Name:     username,
+		Response: resp,
+	}
+
+	str := <-resp
+	if str == "err" {
+		return "", fmt.Errorf("Could not find user %s", username)
+	}
+
+	return str, nil
 }

@@ -8,7 +8,7 @@ import (
 	"net/url"
 	"strings"
 
-	"golang.org/x/net/websocket"
+	"github.com/superp00t/godog/xmpp/ws"
 )
 
 const (
@@ -19,6 +19,7 @@ const (
 	JoinMucStanza     = "<presence from='{{.JID}}' to='{{.MUCJID}}' xmlns='jabber:client'><x xmlns='http://jabber.org/protocol/muc'/></presence>"
 	JoinMucStanza2    = "<presence from='{{.JID}}' to='{{.MUCJID}}' xmlns='jabber:client'><show/><status/></presence>"
 	SendMessageStanza = "<message to='{{.Recipient}}' from='{{.JID}}' type='{{.Type}}' xmlns='jabber:client'><body xmlns='jabber:client'>{{.Body}}</body><x xmlns='jabber:x:event'><active/></x></message>"
+	KickUserStanza    = `<iq from='{{.JID}}' id='kick1' to='{{.MUCJID}}' type='set'><query xmlns='http://jabber.org/protocol/muc#admin'><item nick='{{.Nick}}' role='none'><reason>{{.Reason}}</reason></item></query></iq>`
 )
 
 type Presence struct {
@@ -54,6 +55,9 @@ type Stanza struct {
 	Recipient string
 	Type      string
 	Body      string
+	Nick      string
+	Reason    string
+	MyNick    string
 }
 
 type IQ struct {
@@ -73,12 +77,13 @@ type Opts struct {
 	Host               string
 	Username, Password string
 	Debug              bool
+	Nick               string
 }
 
 type Client struct {
 	JID  string
 	Opts Opts
-	Sock *websocket.Conn
+	Sock ws.Conn
 }
 
 func (s Stanza) Render(st string) string {
@@ -105,7 +110,7 @@ func (o Opts) Connect() (*Client, error) {
 	u.Scheme = "https"
 	u.Path = "/"
 
-	c, err := websocket.Dial(o.WSURL, "xmpp", u.String())
+	c, err := ws.DialConn(o.WSURL)
 	if err != nil {
 		return nil, err
 	}
@@ -145,7 +150,7 @@ func (o Opts) Connect() (*Client, error) {
 }
 
 func (c *Client) send(stanza string) error {
-	err := websocket.Message.Send(c.Sock, stanza)
+	err := c.Sock.Send(stanza)
 	if err != nil {
 		return err
 	}
@@ -157,8 +162,7 @@ func (c *Client) send(stanza string) error {
 }
 
 func (c *Client) recv() (string, error) {
-	var stanza string
-	err := websocket.Message.Receive(c.Sock, &stanza)
+	stanza, err := c.Sock.Recv()
 	if err != nil {
 		return "", err
 	}
@@ -212,4 +216,14 @@ func (c *Client) SendMessage(jid, typeof, body string) {
 		Body:      body,
 		JID:       c.JID,
 	}.Render(SendMessageStanza))
+}
+
+func (c *Client) Kick(lobby, nick, reason string) error {
+	c.send(Stanza{
+		JID:    c.JID,
+		MUCJID: lobby,
+		Nick:   nick,
+		Reason: reason,
+	}.Render(KickUserStanza))
+	return nil
 }
