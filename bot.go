@@ -1,118 +1,238 @@
 package main
 
 import (
+	"bytes"
 	"fmt"
 	"log"
-	"strings"
+	"math/rand"
+	"net/http"
+	"os/exec"
+	"sort"
+	"sync"
 	"time"
 
-	"github.com/superp00t/godog/multiparty"
-	"github.com/superp00t/godog/xmpp"
+	"encoding/json"
+
+	"strings"
+
+	csay "github.com/dhruvbird/go-cowsay"
+	"github.com/ogier/pflag"
+	"github.com/olekukonko/tablewriter"
+	"github.com/superp00t/godog/phoxy"
 )
-
-var (
-	c     *xmpp.Client
-	name  = "ROBOCOP"
-	lobby = "stringy@conference.ikrypto.club"
-	me    *multiparty.Me
-)
-
-func local(name string) string {
-	return strings.Split(name, "/")[1]
-}
-
-func send(mesg string) {
-	c.SendMessage(lobby, "groupchat", me.SendMessage([]byte(mesg)))
-}
-
-func sendf(format string, args ...interface{}) {
-	send(fmt.Sprintf(format, args...))
-}
 
 func main() {
-	me = multiparty.NewMe(name)
+	ap := pflag.StringP("api_key", "a", "admin", "the API key for use with the Phoxy administration API")
+	pflag.Parse()
 
-	var err error
-	c, err = xmpp.Opts{
-		WSURL: "wss://ikrypto.club/socket",
-		Host:  "ikrypto.club",
-		Debug: true,
-		Nick:  name,
-	}.Connect()
+	joinedAt := make(map[string]int64)
+	joinLock := new(sync.Mutex)
+
+	b, err := phoxy.New(&phoxy.Opts{
+		Username: "bot",
+		Chatroom: "lobby",
+		Endpoint: "https://ikrypto.club/phoxy/",
+		APIKey:   *ap,
+	})
 
 	if err != nil {
 		log.Fatal(err)
 	}
 
-	c.JoinMUC(lobby, name)
+	start := time.Now()
+	cmd := NewCmdParser()
+	topic := "No topic yet"
 
-	for {
-		t, err := c.Recv()
-		if err != nil {
-			log.Fatal(err)
+	cmd.Add("ban", "bans a user", func(from string, args []string) string {
+		if len(args) < 1 {
+			return "usage: .ban <username>"
 		}
 
-		go func() {
-			switch t.(type) {
-			case xmpp.Message:
-				msg := t.(xmpp.Message)
-				switch msg.Type {
-				case "groupchat":
-					normalName := local(msg.From)
-					b, err := me.ReceiveMessage(normalName, msg.Body)
-					if err != nil {
-						fmt.Println("Error decrypting message:", err)
-						c.SendMessage(lobby, "groupchat", me.SendPublicKey(normalName))
-					} else {
-						if b != nil {
-							message := string(b)
-							fmt.Printf("<%s>\t%s\n", normalName, message)
-							if strings.HasPrefix(message, name+": ") {
-								cmd := strings.Split(message, " ")
-								switch cmd[1] {
-								case "time":
-									sendf("The time is %v", time.Now())
-								case "help":
-									sendf("Commands: \n\ttime\n\thelp")
-								case "hello":
-									sendf("Hello to you as well, %s!", normalName)
-								// case "kick":
-								// 	if normalName == "kommy" {
-								// 		if len(cmd) == 3 {
-								// 			c.Kick(lobby, cmd[2], "It has been ordained")
-								// 			sendf("GTFO, %s!", cmd[2])
-								// 		} else {
-								// 			sendf("No can do, %s.", normalName)
-								// 		}
-								// 	}
-								case ".":
-									sendf("%s: .", normalName)
-								default:
-									sendf("%s is not a valid command. Type %s: help for help.", cmd[1], name)
-								}
-							}
-							// if message == "RIP Harambe" {
-							// 	c.SendMessage(lobby, "groupchat", me.SendMessage([]byte("dicks out")))
-							// }
-						}
-					}
-				}
-			case xmpp.Presence:
-				pres := t.(xmpp.Presence)
-				loc := local(pres.From)
-				if loc == name {
-					break
-				}
+		targ := args[0]
 
-				switch pres.Type {
-				case "unavailable":
-					fmt.Printf("User %s is now logged out.\n", loc)
-					me.DestroyUser(loc)
-				default:
-					//fmt.Printf("Presence from %s of type %s\n", pres.From, pres.Type)
-					c.SendMessage(lobby, "groupchat", me.SendMessage([]byte(fmt.Sprintf("Hello, %s!", loc))))
+		if b.IsAuthorized(b.Opts.Chatroom, from) {
+			go func() {
+				time.Sleep(1000 * time.Millisecond)
+				b.Ban(b.Opts.Chatroom, targ)
+			}()
+			return fmt.Sprintf("%s has been banned.", targ)
+		}
+
+		return "You are not authorized to perform this action."
+	})
+
+	cmd.Add("fortune", "shows your fortune", func(from string, args []string) string {
+		var respBuf bytes.Buffer
+		c := exec.Command("fortune")
+		c.Stdout = &respBuf
+		c.Run()
+		return respBuf.String()
+	})
+
+	cmd.Add("cleanup", "destroys recently connected users", func(from string, args []string) string {
+		if b.IsAuthorized(b.Opts.Chatroom, from) {
+			tn := time.Now().UnixNano()
+			tenSeconds := (10 * time.Second).Nanoseconds()
+
+			dn := 0
+			for name, v := range joinedAt {
+				dn++
+				if v > (tn - tenSeconds) {
+					b.Ban(b.Opts.Chatroom, name)
 				}
 			}
-		}()
+
+			return fmt.Sprintf("Cleaned up %d names.", dn)
+		}
+
+		return ""
+	})
+
+	cmd.Add("set_topic", "sets the topic", func(from string, args []string) string {
+		top := strings.Join(args, " ")
+		topic = top
+		return fmt.Sprintf("topic set to \"%s\"", topic)
+	})
+
+	cmd.Add("uptime", "shows how much uptime this bot has", func(from string, args []string) string {
+		return fmt.Sprintf("uptime: %v", time.Since(start))
+	})
+
+	cmd.Add("quote", "Selects a random quote from https://ikrypto.club/quotes/", func(from string, args []string) string {
+		r, err := http.Get("https://ikrypto.club/quotes/api/quotes")
+		if err != nil {
+			return ""
+		}
+		var q []Quote
+		json.NewDecoder(r.Body).Decode(&q)
+		rand.Seed(time.Now().Unix())
+		qe := q[rand.Intn(len(q))]
+		return qe.Body
+	})
+
+	cmd.Add("cowsay", "the cow says stuff", func(from string, args []string) string {
+		if len(args) == 0 {
+			return "usage: .cowsay <text>"
+		}
+
+		txt := strings.Join(args, " ")
+		return "```" + csay.Format(txt)
+	})
+
+	cmd.Add("help", "shows this message", func(from string, args []string) string {
+		buf := new(bytes.Buffer)
+		table := tablewriter.NewWriter(buf)
+		table.SetHeader([]string{"Command", "Description"})
+		table.SetBorder(false)
+
+		var help [][]string
+		var ids []string
+		for cn, _ := range cmd.Cmds {
+			ids = append(ids, cn)
+		}
+
+		sort.Strings(ids)
+
+		for _, id := range ids {
+			help = append(help, []string{id, cmd.Cmds[id].Description})
+		}
+
+		table.AppendBulk(help)
+		table.Render()
+		return "```" + buf.String()
+	})
+
+	b.HandleFunc("groupMessage", func(ev *phoxy.Event) {
+		if ev.Body == "." {
+			b.GroupMessage(".")
+			return
+		}
+
+		msg := cmd.Parse(ev.Username, ev.Body)
+		if msg != "" {
+			b.GroupMessage(msg)
+		}
+	})
+
+	b.HandleFunc("userJoin", func(ev *phoxy.Event) {
+		if ev.Username == b.Opts.Username {
+			return
+		}
+		log.Printf("User %s joined\n", ev.Username)
+		// Don't annoy people when you join
+		if time.Since(start) < (3 * time.Second) {
+			return
+		}
+
+		joinLock.Lock()
+		joinedAt[ev.Username] = time.Now().UnixNano()
+		joinLock.Unlock()
+
+		time.Sleep(1200 * time.Millisecond)
+		b.Groupf("Hey, %s! The topic of this conversation is \"%s\"", ev.Username, topic)
+	})
+
+	err = b.Connect()
+	log.Fatal("Error connecting,", err)
+}
+
+type Quote struct {
+	Id         int64  `json:"id" xorm:"'id'"`
+	Body       string `json:"body" xorm:"longtext 'body'"`
+	Time       int64  `json:"time" xorm:"'time'"`
+	TimeFormat string `json:"-" xorm:"-"`
+}
+
+type CmdFunc func(from string, args []string) string
+
+type CmdParser struct {
+	Cmds map[string]*CmdEntry
+	Rate map[string]*time.Time
+}
+
+func NewCmdParser() *CmdParser {
+	return &CmdParser{
+		Cmds: make(map[string]*CmdEntry),
+		Rate: make(map[string]*time.Time),
 	}
+}
+
+type CmdEntry struct {
+	Description string
+	Func        *CmdFunc
+}
+
+func (th *CmdParser) Add(cmd, description string, fn CmdFunc) {
+	th.Cmds[cmd] = &CmdEntry{
+		Description: description,
+		Func:        &fn,
+	}
+}
+
+func (th *CmdParser) Parse(from string, cmd string) string {
+	if strings.HasPrefix(cmd, ".") == false {
+		return ""
+	}
+
+	t := time.Now()
+	th.Rate[from] = &t
+
+	cmd = strings.TrimLeft(cmd, ".")
+	cmdarg := strings.Split(cmd, " ")
+	if len(cmd) < 1 {
+		return ""
+	}
+
+	cmdCmd := cmdarg[0]
+	cmdArgs := []string{}
+	if len(cmdarg) > 1 {
+		cmdArgs = cmdarg[1:]
+	}
+
+	if cm := th.Cmds[cmdCmd]; cm != nil {
+		c := *cm.Func
+		return c(from, cmdArgs)
+	}
+
+	return ""
 }

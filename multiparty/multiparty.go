@@ -57,6 +57,7 @@ type Me struct {
 	destroyuser     chan string
 	saveprofile     chan chan string
 	fingerprintuser chan fingerprintUserRequest
+	shutdown        chan bool
 }
 
 func Sha512(input []byte) []byte {
@@ -172,6 +173,10 @@ func (me *Me) receiveMessage(sender string, message string) ([]byte, error) {
 	var m Answer
 	err := json.Unmarshal([]byte(message), &m)
 	if err != nil {
+		return nil, nil
+	}
+
+	if sender == me.Name {
 		return nil, nil
 	}
 
@@ -427,10 +432,12 @@ func NewMe(username string, profile string) (*Me, error) {
 		me.GenerateKeys()
 	}
 
+	me.destroyuser = make(chan string)
 	me.recvmsg = make(chan recvMessageRequest)
 	me.sendmsg = make(chan sendMessageRequest)
 	me.fingerprintuser = make(chan fingerprintUserRequest)
 	me.saveprofile = make(chan chan string)
+	me.shutdown = make(chan bool)
 	// Enforce mutually exclusive access
 	go func() {
 		for {
@@ -454,6 +461,8 @@ func NewMe(username string, profile string) (*Me, error) {
 				}
 			case save := <-me.saveprofile:
 				save <- me.saveProfile()
+			case <-me.shutdown:
+				return
 			}
 		}
 	}()
@@ -509,4 +518,8 @@ func (me *Me) FingerprintUser(username string) (string, error) {
 	}
 
 	return str, nil
+}
+
+func (me *Me) Shutdown() {
+	me.shutdown <- true
 }
