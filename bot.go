@@ -6,8 +6,8 @@ import (
 	"log"
 	"math/rand"
 	"net/http"
-	"os/exec"
 	"sort"
+	"strconv"
 	"sync"
 	"time"
 
@@ -29,7 +29,7 @@ func main() {
 	joinLock := new(sync.Mutex)
 
 	b, err := phoxy.New(&phoxy.Opts{
-		Username: "bot",
+		Username: "harambe",
 		Chatroom: "lobby",
 		Endpoint: "https://ikrypto.club/phoxy/",
 		APIKey:   *ap,
@@ -42,6 +42,7 @@ func main() {
 	start := time.Now()
 	cmd := NewCmdParser()
 	topic := "No topic yet"
+	unAuthMsg := "You are not authorized to perform this action"
 
 	cmd.Add("ban", "bans a user", func(from string, args []string) string {
 		if len(args) < 1 {
@@ -58,34 +59,43 @@ func main() {
 			return fmt.Sprintf("%s has been banned.", targ)
 		}
 
-		return "You are not authorized to perform this action."
+		return unAuthMsg
 	})
 
-	cmd.Add("fortune", "shows your fortune", func(from string, args []string) string {
-		var respBuf bytes.Buffer
-		c := exec.Command("fortune")
-		c.Stdout = &respBuf
-		c.Run()
-		return respBuf.String()
+	cmd.Add("lockdown", "prevents unlisted names from joining the chat", func(from string, args []string) string {
+		if b.IsAuthorized(b.Opts.Chatroom, from) {
+			b.Lockdown(b.Opts.Chatroom)
+			return ""
+		}
+
+		return unAuthMsg
 	})
 
 	cmd.Add("cleanup", "destroys recently connected users", func(from string, args []string) string {
-		if b.IsAuthorized(b.Opts.Chatroom, from) {
-			tn := time.Now().UnixNano()
-			tenSeconds := (10 * time.Second).Nanoseconds()
+		if len(args) < 1 {
+			return "usage: .cleanup <seconds>"
+		}
 
-			dn := 0
-			for name, v := range joinedAt {
-				dn++
-				if v > (tn - tenSeconds) {
-					b.Ban(b.Opts.Chatroom, name)
-				}
+		if b.IsAuthorized(b.Opts.Chatroom, from) {
+			ti, err := strconv.ParseInt(args[0], 10, 64)
+			if err != nil {
+				return err.Error()
 			}
 
+			dn, err := b.Cleanup(b.Opts.Chatroom, ti)
 			return fmt.Sprintf("Cleaned up %d names.", dn)
 		}
 
-		return ""
+		return unAuthMsg
+	})
+
+	cmd.Add("lockdown", "prevents new users from joining the room", func(from string, arg []string) string {
+		if b.IsAuthorized(b.Opts.Chatroom, from) {
+			b.Lockdown(b.Opts.Chatroom)
+			return ""
+		}
+
+		return unAuthMsg
 	})
 
 	cmd.Add("set_topic", "sets the topic", func(from string, args []string) string {
@@ -96,6 +106,11 @@ func main() {
 
 	cmd.Add("uptime", "shows how much uptime this bot has", func(from string, args []string) string {
 		return fmt.Sprintf("uptime: %v", time.Since(start))
+	})
+
+	// Fun functions
+	cmd.Add("ratpost", "Queries a random rat from Reddit", func(from string, args []string) string {
+		return getRat(b)
 	})
 
 	cmd.Add("quote", "Selects a random quote from https://ikrypto.club/quotes/", func(from string, args []string) string {
@@ -181,58 +196,4 @@ type Quote struct {
 	Body       string `json:"body" xorm:"longtext 'body'"`
 	Time       int64  `json:"time" xorm:"'time'"`
 	TimeFormat string `json:"-" xorm:"-"`
-}
-
-type CmdFunc func(from string, args []string) string
-
-type CmdParser struct {
-	Cmds map[string]*CmdEntry
-	Rate map[string]*time.Time
-}
-
-func NewCmdParser() *CmdParser {
-	return &CmdParser{
-		Cmds: make(map[string]*CmdEntry),
-		Rate: make(map[string]*time.Time),
-	}
-}
-
-type CmdEntry struct {
-	Description string
-	Func        *CmdFunc
-}
-
-func (th *CmdParser) Add(cmd, description string, fn CmdFunc) {
-	th.Cmds[cmd] = &CmdEntry{
-		Description: description,
-		Func:        &fn,
-	}
-}
-
-func (th *CmdParser) Parse(from string, cmd string) string {
-	if strings.HasPrefix(cmd, ".") == false {
-		return ""
-	}
-
-	t := time.Now()
-	th.Rate[from] = &t
-
-	cmd = strings.TrimLeft(cmd, ".")
-	cmdarg := strings.Split(cmd, " ")
-	if len(cmd) < 1 {
-		return ""
-	}
-
-	cmdCmd := cmdarg[0]
-	cmdArgs := []string{}
-	if len(cmdarg) > 1 {
-		cmdArgs = cmdarg[1:]
-	}
-
-	if cm := th.Cmds[cmdCmd]; cm != nil {
-		c := *cm.Func
-		return c(from, cmdArgs)
-	}
-
-	return ""
 }

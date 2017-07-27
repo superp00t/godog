@@ -120,7 +120,9 @@ func (pc *PhoxyConn) Connect() error {
 	signedURL := pc.BackendURL() + "?k=" + urlEncode(pc.OTRKey.PublicKey.Serialize(nil))
 	signedURL = signedURL + "&r=" + urlEncode(r)
 	signedURL = signedURL + "&s=" + urlEncode(s)
-	signedURL = signedURL + "&api_key=" + pc.Opts.APIKey
+	if pc.Opts.APIKey != "" {
+		signedURL = signedURL + "&api_key=" + pc.Opts.APIKey
+	}
 
 	pc.Conn, err = websocket.Dial(signedURL, "", "http://localhost/")
 	if err != nil {
@@ -177,6 +179,8 @@ func (pc *PhoxyConn) Connect() error {
 						Body:     msgo2.Body,
 					})
 				}
+			case "chat":
+
 			case "unavailable":
 				pc.Me.DestroyUser(pkt.Nickname)
 				pc.CallFunc("userQuit", &Event{
@@ -236,6 +240,42 @@ func (pc *PhoxyConn) Ban(chat, name string) error {
 	}
 
 	r, err := http.Get(pc.APIURL("/ban/") + name + "/" + chat)
+	if err != nil || r.StatusCode == 404 {
+		return fmt.Errorf("unauthorized")
+	}
+
+	return nil
+}
+
+type cleanupReport struct {
+	Status int    `json:"status"`
+	Error  string `json:"error"`
+
+	NamesCleaned int `json:"names_cleaned"`
+}
+
+func (pc *PhoxyConn) Cleanup(chat string, time int64) (int, error) {
+	if pc.Opts.APIKey == "" {
+		return 0, fmt.Errorf("need api key")
+	}
+
+	r, err := http.Get(pc.APIURL("/cleanup/") + chat + "/" + fmt.Sprintf("%d", time))
+	if err != nil || r.StatusCode == 404 {
+		return 0, fmt.Errorf("unauthorized")
+	}
+
+	var cr cleanupReport
+	json.NewDecoder(r.Body).Decode(&cr)
+
+	return cr.NamesCleaned, nil
+}
+
+func (pc *PhoxyConn) Lockdown(chat string) error {
+	if pc.Opts.APIKey == "" {
+		return fmt.Errorf("need api key")
+	}
+
+	r, err := http.Get(pc.APIURL("/lockdown/") + chat)
 	if err != nil || r.StatusCode == 404 {
 		return fmt.Errorf("unauthorized")
 	}
