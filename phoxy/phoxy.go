@@ -13,11 +13,24 @@ import (
 	"golang.org/x/net/websocket"
 
 	"encoding/base64"
+	mrand "math/rand"
 
 	"time"
 
 	"github.com/superp00t/godog/multiparty"
+	"github.com/superp00t/godog/xmpp/bosh"
 )
+
+type ConnType int
+
+const (
+	PHOXY ConnType = iota
+	BOSH
+)
+
+type OTRMessage struct {
+	Body string `json:"body"`
+}
 
 type Packet struct {
 	Type     string           `json:"type"`
@@ -41,6 +54,7 @@ type HandlerFunc func(*Event)
 
 type PhoxyConn struct {
 	Conn *websocket.Conn
+	BC   *bosh.Conn
 	Me   *multiparty.Me
 
 	APIKey   string
@@ -49,6 +63,9 @@ type PhoxyConn struct {
 	OTRKey *otr.PrivateKey
 	Opts   *Opts
 	Errc   chan error
+
+	Closed bool
+	PM     map[string]*otr.Conversation
 }
 
 type MessageObject struct {
@@ -57,12 +74,15 @@ type MessageObject struct {
 }
 
 type Opts struct {
+	Type               ConnType
 	Username, Chatroom string
 	Endpoint           string
 
 	APIKey          string
 	MpOTRPrivateKey string
 	OTRPrivateKey   string
+
+	SpamTesting bool
 }
 
 func urlEncode(inp []byte) string {
@@ -77,7 +97,8 @@ func urlEncode(inp []byte) string {
 
 func New(o *Opts) (*PhoxyConn, error) {
 	pc := new(PhoxyConn)
-	pc.Errc = make(chan error)
+	pc.Errc = make(chan error, 10)
+	pc.PM = make(map[string]*otr.Conversation)
 	pc.Handlers = make(map[string]*HandlerFunc)
 	ok := new(otr.PrivateKey)
 	if o.OTRPrivateKey == "" {
@@ -107,92 +128,170 @@ func New(o *Opts) (*PhoxyConn, error) {
 	return pc, nil
 }
 
-func (pc *PhoxyConn) Connect() error {
-	var err error
-	R, S, err := dsa.Sign(rand.Reader, &pc.OTRKey.PrivateKey, []byte("login"))
-	if err != nil {
-		return err
-	}
-
-	r := R.Bytes()
-	s := S.Bytes()
-
-	signedURL := pc.BackendURL() + "?k=" + urlEncode(pc.OTRKey.PublicKey.Serialize(nil))
-	signedURL = signedURL + "&r=" + urlEncode(r)
-	signedURL = signedURL + "&s=" + urlEncode(s)
-	if pc.Opts.APIKey != "" {
-		signedURL = signedURL + "&api_key=" + pc.Opts.APIKey
-	}
-
-	pc.Conn, err = websocket.Dial(signedURL, "", "http://localhost/")
-	if err != nil {
-		return err
-	}
-
-	pc.Send(Packet{
-		Type:     "join_chat",
-		Chatroom: pc.Opts.Chatroom,
-		Nickname: pc.Opts.Username,
-	})
-
+func (pc *PhoxyConn) SendPublicKey(nick string) {
+	str := pc.Me.SendPublicKey(nick)
 	go func() {
-		for {
-			var msg string
-			if err := websocket.Message.Receive(pc.Conn, &msg); err != nil {
-				pc.Errc <- err
-				return
-			}
+		time.Sleep(300 * time.Millisecond)
+		if pc.Opts.Type == BOSH {
+			pc.BC.SendGroupMessage(str)
+		}
 
-			var pkt Packet
-			err = json.Unmarshal([]byte(msg), &pkt)
-			if err != nil {
-				pc.Errc <- err
-				return
-			}
-
-			switch pkt.Type {
-			case "user_join":
-				pc.CallFunc("userJoin", &Event{
-					Username: pkt.Nickname,
-				})
-				h := json.RawMessage(pc.Me.SendPublicKey(pkt.Nickname))
-				go func() {
-					for _ = range make([]int, 5) {
-						time.Sleep(300 * time.Millisecond)
-						pc.Send(Packet{
-							Type:     "groupchat",
-							Chatroom: pc.Opts.Chatroom,
-							Object:   &h,
-						})
-					}
-				}()
-			case "groupchat":
-				msgb, err := pc.Me.ReceiveMessage(pkt.Nickname, string(*pkt.Object))
-				if err != nil {
-					continue
-				}
-				if msgb != nil {
-					var msgo2 MessageObject
-					json.Unmarshal(msgb, &msgo2)
-					pc.CallFunc("groupMessage", &Event{
-						Username: pkt.Nickname,
-						Body:     msgo2.Body,
-					})
-				}
-			case "chat":
-
-			case "unavailable":
-				pc.Me.DestroyUser(pkt.Nickname)
-				pc.CallFunc("userQuit", &Event{
-					Username: pkt.Nickname,
-				})
-			case "ping":
-				pc.Send(Packet{
-					Type: "pong",
-				})
-			}
+		if pc.Opts.Type == PHOXY {
+			h := json.RawMessage(str)
+			pc.Send(Packet{
+				Type:     "groupchat",
+				Chatroom: pc.Opts.Chatroom,
+				Object:   &h,
+			})
 		}
 	}()
+}
+func (pc *PhoxyConn) Connect() error {
+	if pc.Opts.Type == PHOXY {
+		var err error
+		R, S, err := dsa.Sign(rand.Reader, &pc.OTRKey.PrivateKey, []byte("login"))
+		if err != nil {
+			return err
+		}
+
+		r := R.Bytes()
+		s := S.Bytes()
+
+		signedURL := pc.BackendURL() + "?k=" + urlEncode(pc.OTRKey.PublicKey.Serialize(nil))
+		if pc.Opts.SpamTesting {
+			signedURL = signedURL + "&fake_ip=" + fakeIP()
+		}
+
+		signedURL = signedURL + "&r=" + urlEncode(r)
+		signedURL = signedURL + "&s=" + urlEncode(s)
+
+		if pc.Opts.APIKey != "" {
+			signedURL = signedURL + "&api_key=" + pc.Opts.APIKey
+		}
+
+		pc.Conn, err = websocket.Dial(signedURL, "", "http://localhost/")
+		if err != nil {
+			return err
+		}
+
+		pc.Send(Packet{
+			Type:     "join_chat",
+			Chatroom: pc.Opts.Chatroom,
+			Nickname: pc.Opts.Username,
+		})
+
+		go func() {
+			for {
+				var msg string
+				if err := websocket.Message.Receive(pc.Conn, &msg); err != nil {
+					pc.Errc <- err
+					return
+				}
+
+				var pkt Packet
+				err = json.Unmarshal([]byte(msg), &pkt)
+				if err != nil {
+					pc.Errc <- err
+					return
+				}
+
+				switch pkt.Type {
+				case "user_join":
+					pc.CallFunc("userJoin", &Event{
+						Username: pkt.Nickname,
+					})
+					pc.SendPublicKey(pkt.Nickname)
+				case "groupchat":
+					msgb, err := pc.Me.ReceiveMessage(pkt.Nickname, string(*pkt.Object))
+					if err != nil {
+						continue
+					}
+					if msgb != nil {
+						var msgo2 MessageObject
+						json.Unmarshal(msgb, &msgo2)
+						pc.CallFunc("groupMessage", &Event{
+							Username: pkt.Nickname,
+							Body:     msgo2.Body,
+						})
+					}
+				case "chat":
+					var cnv *otr.Conversation
+					if cnv = pc.PM[pkt.Nickname]; cnv == nil {
+						cnv = &otr.Conversation{
+							PrivateKey:   pc.OTRKey,
+							Rand:         rand.Reader,
+							FragmentSize: 0,
+						}
+						pc.PM[pkt.Nickname] = cnv
+					}
+					var msg OTRMessage
+					json.Unmarshal([]byte(*pkt.Object), &msg)
+					out, _, _, _, err := cnv.Receive([]byte(msg.Body))
+					if err == nil {
+						pc.CallFunc("privateMessage", &Event{
+							Username: pkt.Nickname,
+							Body:     string(out),
+						})
+					}
+				case "unavailable":
+					pc.Me.DestroyUser(pkt.Nickname)
+					pc.CallFunc("userQuit", &Event{
+						Username: pkt.Nickname,
+					})
+				case "ping":
+					pc.Send(Packet{
+						Type: "pong",
+					})
+				}
+			}
+		}()
+	}
+
+	if pc.Opts.Type == BOSH {
+		go func() {
+			c := &bosh.Config{
+				BOSHEndpoint:     pc.Opts.Endpoint,
+				Domain:           "crypto.dog",
+				ConferenceDomain: "conference.crypto.dog",
+				Lobby:            pc.Opts.Chatroom,
+				HumanName:        pc.Opts.Username,
+			}
+
+			err := bosh.NewConversation(c, func(c *bosh.Conn, ev *bosh.XMPPEvent) {
+				pc.BC = c
+				switch ev.Type {
+				case "UserJoin":
+					pc.CallFunc("userJoin", &Event{
+						Username: ev.Username,
+					})
+					pc.SendPublicKey(ev.Username)
+				case "UserQuit":
+					pc.CallFunc("userQuit", &Event{
+						Username: ev.Username,
+					})
+					pc.Me.DestroyUser(ev.Username)
+				case "GroupchatMessageReceived":
+					if ev.Username == pc.Opts.Username {
+						return
+					}
+					msgb, err := pc.Me.ReceiveMessage(ev.Username, ev.Message)
+					if err != nil {
+						pc.SendPublicKey(ev.Username)
+						return
+					}
+					if msgb != nil {
+						pc.CallFunc("groupMessage", &Event{
+							Username: ev.Username,
+							Body:     string(msgb),
+						})
+					}
+				}
+			})
+			if err != nil {
+				pc.Errc <- err
+			}
+		}()
+	}
 
 	return <-pc.Errc
 }
@@ -205,6 +304,9 @@ func (pc *PhoxyConn) CallFunc(typ string, msg *Event) {
 }
 
 func (pc *PhoxyConn) Send(p Packet) {
+	if pc.Conn == nil {
+		return
+	}
 	if err := websocket.Message.Send(pc.Conn, p.Encode()); err != nil {
 		pc.Errc <- err
 		return
@@ -216,18 +318,26 @@ func (pc *PhoxyConn) HandleFunc(typ string, h HandlerFunc) {
 }
 
 func (pc *PhoxyConn) GroupMessage(body string) {
+	if pc.Opts.Type == BOSH {
+		pc.BC.SendGroupMessage(pc.Me.SendMessage([]byte(body)))
+		return
+	}
+
 	enc := MessageObject{
 		Type: "message",
 		Body: body,
 	}
 	dat, _ := json.Marshal(enc)
 	msg := pc.Me.SendMessage(dat)
-	h := json.RawMessage(msg)
-	pc.Send(Packet{
-		Type:     "groupchat",
-		Chatroom: pc.Opts.Chatroom,
-		Object:   &h,
-	})
+
+	if pc.Opts.Type == PHOXY {
+		h := json.RawMessage(msg)
+		pc.Send(Packet{
+			Type:     "groupchat",
+			Chatroom: pc.Opts.Chatroom,
+			Object:   &h,
+		})
+	}
 }
 
 func (pc *PhoxyConn) Groupf(body string, args ...interface{}) {
@@ -235,8 +345,8 @@ func (pc *PhoxyConn) Groupf(body string, args ...interface{}) {
 }
 
 func (pc *PhoxyConn) Ban(chat, name string) error {
-	if pc.Opts.APIKey == "" {
-		return fmt.Errorf("need api key")
+	if !pc.AmIAuthorized() {
+		return fmt.Errorf("Unauthorized")
 	}
 
 	r, err := http.Get(pc.APIURL("/ban/") + name + "/" + chat)
@@ -255,7 +365,7 @@ type cleanupReport struct {
 }
 
 func (pc *PhoxyConn) Cleanup(chat string, time int64) (int, error) {
-	if pc.Opts.APIKey == "" {
+	if !pc.AmIAuthorized() {
 		return 0, fmt.Errorf("need api key")
 	}
 
@@ -271,7 +381,7 @@ func (pc *PhoxyConn) Cleanup(chat string, time int64) (int, error) {
 }
 
 func (pc *PhoxyConn) Lockdown(chat string) error {
-	if pc.Opts.APIKey == "" {
+	if !pc.AmIAuthorized() {
 		return fmt.Errorf("need api key")
 	}
 
@@ -284,15 +394,27 @@ func (pc *PhoxyConn) Lockdown(chat string) error {
 }
 
 type authorizedAnswer struct {
-	IsAuthorized bool `json:"authorized"`
+	AccessLevel int64 `json:"access_level"`
 }
 
-func (pc *PhoxyConn) IsAuthorized(chat, name string) bool {
+func (pc *PhoxyConn) AmIAuthorized() bool {
+	if pc.Opts.Type == BOSH {
+		return false
+	}
+
 	if pc.Opts.APIKey == "" {
 		return false
 	}
 
-	r, err := http.Get(pc.APIURL("/is_authorized/") + name + "/" + chat)
+	return true
+}
+
+func (pc *PhoxyConn) IsAuthorized(chat, name string) bool {
+	if !pc.AmIAuthorized() {
+		return false
+	}
+
+	r, err := http.Get(pc.APIURL("/access_control/") + name + "/" + chat)
 	if err != nil || r.StatusCode != 200 {
 		return false
 	}
@@ -303,7 +425,7 @@ func (pc *PhoxyConn) IsAuthorized(chat, name string) bool {
 		return false
 	}
 
-	return a.IsAuthorized
+	return a.AccessLevel > 4
 }
 
 func (pc *PhoxyConn) BackendURL() string {
@@ -313,4 +435,26 @@ func (pc *PhoxyConn) BackendURL() string {
 
 func (pc *PhoxyConn) APIURL(path string) string {
 	return pc.Opts.Endpoint + pc.Opts.APIKey + path
+}
+
+func fakeIP() string {
+	oct := make([]string, 4)
+	for v := 0; v < 4; v++ {
+		oct[v] = fmt.Sprintf("%d", mrand.Intn(255))
+	}
+
+	fk := strings.Join(oct, ".")
+	return fk
+}
+
+func (pc *PhoxyConn) Disconnect() {
+	pc.Closed = true
+	if pc.Opts.Type == PHOXY {
+		pc.Conn.Close()
+	}
+
+	if pc.Opts.Type == BOSH {
+		pc.BC.Disconnect()
+
+	}
 }

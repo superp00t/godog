@@ -5,7 +5,13 @@ import (
 	"time"
 )
 
-type CmdFunc func(from string, args []string) string
+type CmdCall struct {
+	From    string
+	Args    []string
+	Private bool
+}
+
+type CmdFunc func(*CmdCall) string
 
 type CmdParser struct {
 	Cmds map[string]*CmdEntry
@@ -31,7 +37,7 @@ func (th *CmdParser) Add(cmd, description string, fn CmdFunc) {
 	}
 }
 
-func (th *CmdParser) Parse(from string, cmd string) string {
+func (th *CmdParser) Parse(private bool, from string, cmd string) string {
 	if strings.HasPrefix(cmd, ".") == false {
 		return ""
 	}
@@ -53,7 +59,11 @@ func (th *CmdParser) Parse(from string, cmd string) string {
 
 	if cm := th.Cmds[cmdCmd]; cm != nil {
 		c := *cm.Func
-		return c(from, cmdArgs)
+		return c(&CmdCall{
+			From:    from,
+			Args:    cmdArgs,
+			Private: private,
+		})
 	}
 
 	return ""
