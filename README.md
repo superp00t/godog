@@ -1,6 +1,6 @@
 # Godog
 
-![godog](https://img.ikrypto.club/iGGo.png)
+![godog](https://img.ikrypto.club/JcEB.png)
 
 This is a general-purpose API for writing programs that interact with the main Cryptodog XMPP-BOSH server and Phoxy servers. 
 
