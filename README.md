@@ -2,7 +2,7 @@
 
 ![godog](https://img.ikrypto.club/2ENO.png)
 
-This is a general-purpose API for writing programs that interact with the main Cryptodog XMPP-BOSH server and Phoxy servers. 
+This is a general-purpose API for writing programs that interact with the main Cryptodog XMPP-BOSH server and [Phoxy](https://git.ikrypto.club/superp00t/PhoxyCryptodog/) servers. 
 
 The multiparty implementation has been mostly a line-by-line translation from Cryptodog's, with some help from the protocol spec. However, I cannot guarantee that it is a safe one.
 
