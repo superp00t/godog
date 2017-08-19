@@ -8,7 +8,6 @@ import (
 	"net/http"
 	"sort"
 	"strconv"
-	"sync"
 	"time"
 
 	"encoding/json"
@@ -23,18 +22,21 @@ import (
 
 func main() {
 	ap := pflag.StringP("api_key", "a", "admin", "the API key for use with the Phoxy administration API")
+	mainCD := pflag.BoolP("maincd", "m", false, "connect to the standard XMPP BOSH server")
+	name := pflag.StringP("name", "n", "harambe", "username")
 	pflag.Parse()
 
-	joinedAt := make(map[string]int64)
-	joinLock := new(sync.Mutex)
+	opts := []phoxy.Opts{
+		{phoxy.PHOXY, *name, "lobby", "https://ikrypto.club/phoxy/", *ap, "", "", false},
+		{phoxy.BOSH, *name, "lobby", "https://crypto.dog/http-bind/", *ap, "", "", false},
+	}
 
-	b, err := phoxy.New(&phoxy.Opts{
-		Username: "harambe",
-		Chatroom: "lobby",
-		Endpoint: "https://ikrypto.club/phoxy/",
-		APIKey:   *ap,
-	})
+	sel := 0
+	if *mainCD {
+		sel = 1
+	}
 
+	b, err := phoxy.New(&opts[sel])
 	if err != nil {
 		log.Fatal(err)
 	}
@@ -44,14 +46,14 @@ func main() {
 	topic := "No topic yet"
 	unAuthMsg := "You are not authorized to perform this action"
 
-	cmd.Add("ban", "bans a user", func(from string, args []string) string {
-		if len(args) < 1 {
+	cmd.Add("ban", "bans a user", func(c *CmdCall) string {
+		if len(c.Args) < 1 {
 			return "usage: .ban <username>"
 		}
 
-		targ := args[0]
+		targ := c.Args[0]
 
-		if b.IsAuthorized(b.Opts.Chatroom, from) {
+		if b.IsAuthorized(b.Opts.Chatroom, c.From) {
 			go func() {
 				time.Sleep(1000 * time.Millisecond)
 				b.Ban(b.Opts.Chatroom, targ)
@@ -62,8 +64,8 @@ func main() {
 		return unAuthMsg
 	})
 
-	cmd.Add("lockdown", "prevents unlisted names from joining the chat", func(from string, args []string) string {
-		if b.IsAuthorized(b.Opts.Chatroom, from) {
+	cmd.Add("lockdown", "prevents unlisted names from joining the chat", func(c *CmdCall) string {
+		if b.IsAuthorized(b.Opts.Chatroom, c.From) {
 			b.Lockdown(b.Opts.Chatroom)
 			return ""
 		}
@@ -71,13 +73,13 @@ func main() {
 		return unAuthMsg
 	})
 
-	cmd.Add("cleanup", "destroys recently connected users", func(from string, args []string) string {
-		if len(args) < 1 {
+	cmd.Add("cleanup", "destroys recently connected users", func(c *CmdCall) string {
+		if len(c.Args) < 1 {
 			return "usage: .cleanup <seconds>"
 		}
 
-		if b.IsAuthorized(b.Opts.Chatroom, from) {
-			ti, err := strconv.ParseInt(args[0], 10, 64)
+		if b.IsAuthorized(b.Opts.Chatroom, c.From) {
+			ti, err := strconv.ParseInt(c.Args[0], 10, 64)
 			if err != nil {
 				return err.Error()
 			}
@@ -89,8 +91,8 @@ func main() {
 		return unAuthMsg
 	})
 
-	cmd.Add("lockdown", "prevents new users from joining the room", func(from string, arg []string) string {
-		if b.IsAuthorized(b.Opts.Chatroom, from) {
+	cmd.Add("lockdown", "prevents new users from joining the room", func(c *CmdCall) string {
+		if b.IsAuthorized(b.Opts.Chatroom, c.From) {
 			b.Lockdown(b.Opts.Chatroom)
 			return ""
 		}
@@ -98,22 +100,22 @@ func main() {
 		return unAuthMsg
 	})
 
-	cmd.Add("set_topic", "sets the topic", func(from string, args []string) string {
-		top := strings.Join(args, " ")
+	cmd.Add("set_topic", "sets the topic", func(c *CmdCall) string {
+		top := strings.Join(c.Args, " ")
 		topic = top
 		return fmt.Sprintf("topic set to \"%s\"", topic)
 	})
 
-	cmd.Add("uptime", "shows how much uptime this bot has", func(from string, args []string) string {
+	cmd.Add("uptime", "shows how much uptime this bot has", func(c *CmdCall) string {
 		return fmt.Sprintf("uptime: %v", time.Since(start))
 	})
 
 	// Fun functions
-	cmd.Add("ratpost", "Queries a random rat from Reddit", func(from string, args []string) string {
+	cmd.Add("ratpost", "Queries a random rat from Reddit", func(c *CmdCall) string {
 		return getRat(b)
 	})
 
-	cmd.Add("quote", "Selects a random quote from https://ikrypto.club/quotes/", func(from string, args []string) string {
+	cmd.Add("quote", "Selects a random quote from https://ikrypto.club/quotes/", func(c *CmdCall) string {
 		r, err := http.Get("https://ikrypto.club/quotes/api/quotes")
 		if err != nil {
 			return ""
@@ -125,16 +127,16 @@ func main() {
 		return qe.Body
 	})
 
-	cmd.Add("cowsay", "the cow says stuff", func(from string, args []string) string {
-		if len(args) == 0 {
+	cmd.Add("cowsay", "the cow says stuff", func(c *CmdCall) string {
+		if len(c.Args) == 0 {
 			return "usage: .cowsay <text>"
 		}
 
-		txt := strings.Join(args, " ")
+		txt := strings.Join(c.Args, " ")
 		return "```" + csay.Format(txt)
 	})
 
-	cmd.Add("help", "shows this message", func(from string, args []string) string {
+	cmd.Add("help", "shows this message", func(c *CmdCall) string {
 		buf := new(bytes.Buffer)
 		table := tablewriter.NewWriter(buf)
 		table.SetHeader([]string{"Command", "Description"})
@@ -158,12 +160,15 @@ func main() {
 	})
 
 	b.HandleFunc("groupMessage", func(ev *phoxy.Event) {
+		t := time.Now()
+		fmt.Printf("[%d:%d:%d] <%s> %s\n", t.Hour(), t.Minute(), t.Second(), ev.Username, ev.Body)
+
 		if ev.Body == "." {
 			b.GroupMessage(".")
 			return
 		}
 
-		msg := cmd.Parse(ev.Username, ev.Body)
+		msg := cmd.Parse(false, ev.Username, ev.Body)
 		if msg != "" {
 			b.GroupMessage(msg)
 		}
@@ -173,17 +178,12 @@ func main() {
 		if ev.Username == b.Opts.Username {
 			return
 		}
-		log.Printf("User %s joined\n", ev.Username)
-		// Don't annoy people when you join
-		if time.Since(start) < (3 * time.Second) {
+
+		time.Sleep(1200 * time.Millisecond)
+		if time.Now().UnixNano() > start.UnixNano()+(10*time.Second).Nanoseconds() {
 			return
 		}
 
-		joinLock.Lock()
-		joinedAt[ev.Username] = time.Now().UnixNano()
-		joinLock.Unlock()
-
-		time.Sleep(1200 * time.Millisecond)
 		b.Groupf("Hey, %s! The topic of this conversation is \"%s\"", ev.Username, topic)
 	})
 
