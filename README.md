@@ -10,6 +10,57 @@ The XMPP implementation is not very good. It only connects to WebSocket XMPP ser
 
 An example bot is included in this directory.
 ```
-$ go build .
-$ ./godog -a [phoxy api key]
+$ go get -u github.com/superp00t/godog
+$ $GOPATH/bin/godog -a [phoxy api key]
+```
+
+## API usage
+### Connection (Standard XMPP Protocol)
+```go
+
+opts := phoxy.Opts {
+    Type:     phoxy.BOSH,
+    Username: "username",
+    Chatroom: "lobby",
+    Endpoint: "https://crypto.dog/http-bind/",
+}
+
+conn, err := phoxy.New(&opts)
+if err != nil {
+    return
+}
+```
+
+### Connection (Phoxy WebSocket Protocol)
+```go
+
+opts := phoxy.Opts {
+    Type:     phoxy.PHOXY,
+    Username: "username",
+    Chatroom: "lobby",
+    Endpoint: "https://ikrypto.club/phoxy/",
+}
+
+conn, err := phoxy.New(&opts)
+if err != nil {
+    // handle err
+}
+```
+
+### Event handlers
+
+```go
+conn.HandleFunc("userJoin", func(ev *phoxy.Event) {
+    conn.Groupf("Greetings, %s!", ev.Username)
+})
+
+// Echo in all caps
+conn.HandleFunc("groupMessage", func(ev *phoxy.Event) {
+    conn.GroupMessage(strings.ToUpper(ev.Body))
+})
+
+err := conn.Connect()
+if err != nil {
+    // handle err
+}
 ```
