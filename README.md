@@ -27,7 +27,7 @@ opts := phoxy.Opts {
 
 conn, err := phoxy.New(&opts)
 if err != nil {
-    return
+    // handle err
 }
 ```
 
