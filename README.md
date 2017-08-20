@@ -2,11 +2,11 @@
 
 ![godog](https://img.ikrypto.club/2ENO.png)
 
-This is a general-purpose API for writing programs that interact with the main Cryptodog XMPP-BOSH server and [Phoxy](https://git.ikrypto.club/superp00t/PhoxyCryptodog/) servers. 
+This is a general-purpose API for writing programs that interact with Cryptodog.
+
+It can speak two protocols: Phoxy (developed by yours truly) and BOSH-XMPP, which is terrible and slow but still in use by many people. 
 
 The multiparty implementation has been mostly a line-by-line translation from Cryptodog's, with some help from the protocol spec. However, I cannot guarantee that it is a safe one.
-
-The XMPP implementation is not very good. It only connects to WebSocket XMPP servers, and cannot do much. I intend to add more functionality soon.
 
 An example bot is included in this directory.
 ```
@@ -31,7 +31,7 @@ if err != nil {
 }
 ```
 
-### Connection (Phoxy WebSocket Protocol)
+### Connection (Phoxy WebSocket Protocol) 
 ```go
 
 opts := phoxy.Opts {

@@ -161,7 +161,7 @@ func main() {
 
 	b.HandleFunc("groupMessage", func(ev *phoxy.Event) {
 		t := time.Now()
-		fmt.Printf("[%d:%d:%d] <%s> %s\n", t.Hour(), t.Minute(), t.Second(), ev.Username, ev.Body)
+		fmt.Printf("[%d:%d:%d]\t<%s>\t%s\n", t.Hour(), t.Minute(), t.Second(), ev.Username, ev.Body)
 
 		if ev.Body == "." {
 			b.GroupMessage(".")
@@ -184,7 +184,7 @@ func main() {
 			return
 		}
 
-		b.Groupf("Hey, %s! The topic of this conversation is \"%s\"", ev.Username, topic)
+		b.Groupf("Hey, %s! The topic of this conversation is %s", ev.Username, topic)
 	})
 
 	err = b.Connect()

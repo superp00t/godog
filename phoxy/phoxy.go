@@ -133,7 +133,9 @@ func (pc *PhoxyConn) SendPublicKey(nick string) {
 	go func() {
 		time.Sleep(300 * time.Millisecond)
 		if pc.Opts.Type == BOSH {
-			pc.BC.SendGroupMessage(str)
+			if pc.BC != nil {
+				pc.BC.SendGroupMessage(str)
+			}
 		}
 
 		if pc.Opts.Type == PHOXY {
@@ -319,7 +321,9 @@ func (pc *PhoxyConn) HandleFunc(typ string, h HandlerFunc) {
 
 func (pc *PhoxyConn) GroupMessage(body string) {
 	if pc.Opts.Type == BOSH {
-		pc.BC.SendGroupMessage(pc.Me.SendMessage([]byte(body)))
+		if pc.BC != nil {
+			pc.BC.SendGroupMessage(pc.Me.SendMessage([]byte(body)))
+		}
 		return
 	}
 
@@ -454,7 +458,8 @@ func (pc *PhoxyConn) Disconnect() {
 	}
 
 	if pc.Opts.Type == BOSH {
-		pc.BC.Disconnect()
-
+		if pc.BC != nil {
+			pc.BC.Disconnect()
+		}
 	}
 }
