@@ -430,7 +430,6 @@ func NewConn(c Config) (*Conn, error) {
 				return
 			}
 			conn.connL.Lock()
-			log.Println("conn number", conn.conns)
 			time.Sleep(20*time.Millisecond + (time.Duration(conn.conns) * 100 * time.Millisecond))
 			conn.connL.Unlock()
 			conn.RID++
