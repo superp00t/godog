@@ -140,6 +140,9 @@ type Conn struct {
 	userState       map[string]bool
 	userLock        *sync.Mutex
 	started, closed bool
+
+	conns int
+	connL *sync.Mutex
 }
 
 func randomID() string {
@@ -154,10 +157,11 @@ type ChatIntro struct {
 }
 
 type Presence struct {
-	Name xml.Name
-	From string `xml:"from,attr"`
-	To   string `xml:"to,attr"`
-	Type string `xml:"type,attr"`
+	Name  xml.Name
+	From  string `xml:"from,attr"`
+	To    string `xml:"to,attr"`
+	Type  string `xml:"type,attr"`
+	Error *Error `xml:"error"`
 }
 
 func randFloat() float64 {
@@ -218,6 +222,7 @@ func NewConversation(c *Config, onmessage func(*Conn, *XMPPEvent)) error {
 		return err
 	}
 
+	conn.Errorchan = make(chan error)
 	conn.OnMessage = onmessage
 
 	conn.JoinMUC(c.Lobby)
@@ -305,6 +310,12 @@ func (conn *Conn) DecodeMessage(msg string) error {
 	for _, pres := range x.Presence {
 		name := strings.Split(pres.From, "/")[1]
 
+		if pres.Type == "error" {
+			if pres.Error.Code == 409 {
+				conn.Errorchan <- fmt.Errorf("Nickname in use")
+			}
+		}
+
 		if pres.Type == "unavailable" {
 			if conn.userState[name] == true {
 				conn.userState[name] = false
@@ -354,6 +365,9 @@ func (conn *Conn) SendGroupMessage(msg string) {
 func (conn *Conn) Post(client *http.Client, url, payload string) <-chan string {
 	d := make(chan string)
 	go func() {
+		conn.connL.Lock()
+		conn.conns++
+		conn.connL.Unlock()
 		post, err := http.NewRequest("POST", url, strings.NewReader(payload))
 		if err != nil {
 			d <- ""
@@ -364,10 +378,17 @@ func (conn *Conn) Post(client *http.Client, url, payload string) <-chan string {
 		post.Header.Set("User-Agent", "Mozilla/5.0 (Windows NT 6.1; rv:52.0) Gecko/20100101 Firefox/52")
 		r, err := client.Do(post)
 		if err != nil {
+			conn.connL.Lock()
+			conn.conns--
+			conn.connL.Unlock()
 			d <- ""
 			conn.Errorchan <- err
 			return
 		}
+
+		conn.connL.Lock()
+		conn.conns--
+		conn.connL.Unlock()
 
 		var b bytes.Buffer
 		io.Copy(&b, r.Body)
@@ -399,6 +420,7 @@ func NewConn(c Config) (*Conn, error) {
 	conn.userLock = new(sync.Mutex)
 	conn.userState = make(map[string]bool)
 
+	conn.connL = new(sync.Mutex)
 	conn.send = make(chan XTemplate, 128)
 	conn.recv = make(chan string, 128)
 	conn.keepalive = make(chan bool, 128)
@@ -407,7 +429,10 @@ func NewConn(c Config) (*Conn, error) {
 			if conn.closed == true {
 				return
 			}
-			time.Sleep(120 * time.Millisecond)
+			conn.connL.Lock()
+			log.Println("conn number", conn.conns)
+			time.Sleep(20*time.Millisecond + (time.Duration(conn.conns) * 100 * time.Millisecond))
+			conn.connL.Unlock()
 			conn.RID++
 			var pcket string
 			pc := XPacket{

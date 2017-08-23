@@ -180,7 +180,9 @@ func main() {
 		}
 
 		time.Sleep(1200 * time.Millisecond)
-		if time.Now().UnixNano() > start.UnixNano()+(10*time.Second).Nanoseconds() {
+
+		// Don't bother currently logged in users
+		if start.UnixNano() > (time.Now().UnixNano() - (10 * time.Second).Nanoseconds()) {
 			return
 		}
 
