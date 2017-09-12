@@ -50,12 +50,12 @@ if err != nil {
 ### Event handlers
 
 ```go
-conn.HandleFunc("userJoin", func(ev *phoxy.Event) {
+conn.HandleFunc(phoxy.USERJOIN, func(ev *phoxy.Event) {
     conn.Groupf("Greetings, %s!", ev.Username)
 })
 
 // Echo in all caps
-conn.HandleFunc("groupMessage", func(ev *phoxy.Event) {
+conn.HandleFunc(phoxy.GROUPMESSAGE, func(ev *phoxy.Event) {
     conn.GroupMessage(strings.ToUpper(ev.Body))
 })
 
