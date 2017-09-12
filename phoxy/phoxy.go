@@ -28,6 +28,15 @@ const (
 	BOSH
 )
 
+type HandlerField int
+
+const (
+	USERJOIN HandlerField = iota
+	USERQUIT
+	GROUPMESSAGE
+	PRIVATEMESSAGE
+)
+
 type OTRMessage struct {
 	Body string `json:"body"`
 }
@@ -46,8 +55,10 @@ func (p Packet) Encode() string {
 }
 
 type Event struct {
-	Username string
-	Body     string
+	Type     HandlerField `json:"type" xorm:"'type'"`
+	Username string       `json:"username" xorm:"'username'"`
+	Body     string       `json:"body" xorm:"longtext 'body'"`
+	At       int64        `json:"at" xorm:"'at'"`
 }
 
 type HandlerFunc func(*Event)
@@ -58,7 +69,7 @@ type PhoxyConn struct {
 	Me   *multiparty.Me
 
 	APIKey   string
-	Handlers map[string]*HandlerFunc
+	Handlers map[HandlerField]*HandlerFunc
 
 	OTRKey *otr.PrivateKey
 	Opts   *Opts
@@ -66,6 +77,8 @@ type PhoxyConn struct {
 
 	Closed bool
 	PM     map[string]*otr.Conversation
+
+	interceptor func(*Event)
 }
 
 type MessageObject struct {
@@ -99,7 +112,7 @@ func New(o *Opts) (*PhoxyConn, error) {
 	pc := new(PhoxyConn)
 	pc.Errc = make(chan error, 10)
 	pc.PM = make(map[string]*otr.Conversation)
-	pc.Handlers = make(map[string]*HandlerFunc)
+	pc.Handlers = make(map[HandlerField]*HandlerFunc)
 	ok := new(otr.PrivateKey)
 	if o.OTRPrivateKey == "" {
 		ok.Generate(rand.Reader)
@@ -126,6 +139,10 @@ func New(o *Opts) (*PhoxyConn, error) {
 	}
 
 	return pc, nil
+}
+
+func (pc *PhoxyConn) Intercept(f func(*Event)) {
+	pc.interceptor = f
 }
 
 func (pc *PhoxyConn) SendPublicKey(nick string) {
@@ -199,7 +216,7 @@ func (pc *PhoxyConn) Connect() error {
 
 				switch pkt.Type {
 				case "user_join":
-					pc.CallFunc("userJoin", &Event{
+					pc.CallFunc(USERJOIN, &Event{
 						Username: pkt.Nickname,
 					})
 					pc.SendPublicKey(pkt.Nickname)
@@ -211,7 +228,7 @@ func (pc *PhoxyConn) Connect() error {
 					if msgb != nil {
 						var msgo2 MessageObject
 						json.Unmarshal(msgb, &msgo2)
-						pc.CallFunc("groupMessage", &Event{
+						pc.CallFunc(GROUPMESSAGE, &Event{
 							Username: pkt.Nickname,
 							Body:     msgo2.Body,
 						})
@@ -230,14 +247,14 @@ func (pc *PhoxyConn) Connect() error {
 					json.Unmarshal([]byte(*pkt.Object), &msg)
 					out, _, _, _, err := cnv.Receive([]byte(msg.Body))
 					if err == nil {
-						pc.CallFunc("privateMessage", &Event{
+						pc.CallFunc(PRIVATEMESSAGE, &Event{
 							Username: pkt.Nickname,
 							Body:     string(out),
 						})
 					}
 				case "unavailable":
 					pc.Me.DestroyUser(pkt.Nickname)
-					pc.CallFunc("userQuit", &Event{
+					pc.CallFunc(USERQUIT, &Event{
 						Username: pkt.Nickname,
 					})
 				case "ping":
@@ -263,12 +280,12 @@ func (pc *PhoxyConn) Connect() error {
 				pc.BC = c
 				switch ev.Type {
 				case "UserJoin":
-					pc.CallFunc("userJoin", &Event{
+					pc.CallFunc(USERJOIN, &Event{
 						Username: ev.Username,
 					})
 					pc.SendPublicKey(ev.Username)
 				case "UserQuit":
-					pc.CallFunc("userQuit", &Event{
+					pc.CallFunc(USERQUIT, &Event{
 						Username: ev.Username,
 					})
 					pc.Me.DestroyUser(ev.Username)
@@ -282,7 +299,7 @@ func (pc *PhoxyConn) Connect() error {
 						return
 					}
 					if msgb != nil {
-						pc.CallFunc("groupMessage", &Event{
+						pc.CallFunc(GROUPMESSAGE, &Event{
 							Username: ev.Username,
 							Body:     string(msgb),
 						})
@@ -298,9 +315,16 @@ func (pc *PhoxyConn) Connect() error {
 	return <-pc.Errc
 }
 
-func (pc *PhoxyConn) CallFunc(typ string, msg *Event) {
+func (pc *PhoxyConn) CallFunc(typ HandlerField, msg *Event) {
+	msg.Type = typ
+	msg.At = time.Now().UnixNano()
+	if pc.interceptor != nil {
+		pc.interceptor(msg)
+	}
+
 	if h := pc.Handlers[typ]; h != nil {
 		he := *h
+
 		go he(msg)
 	}
 }
@@ -315,7 +339,7 @@ func (pc *PhoxyConn) Send(p Packet) {
 	}
 }
 
-func (pc *PhoxyConn) HandleFunc(typ string, h HandlerFunc) {
+func (pc *PhoxyConn) HandleFunc(typ HandlerField, h HandlerFunc) {
 	pc.Handlers[typ] = &h
 }
 
@@ -361,6 +385,73 @@ func (pc *PhoxyConn) Ban(chat, name string) error {
 	return nil
 }
 
+func (pc *PhoxyConn) Chmod(chat, name, level string) error {
+	if !pc.AmIAuthorized() {
+		return fmt.Errorf("Unauthorized")
+	}
+
+	r, err := http.Get(pc.APIURL("/chmod/") + name + "/" + chat + "/" + level)
+	if err != nil || r.StatusCode == 404 {
+		return fmt.Errorf("unauthorized")
+	}
+
+	return nil
+}
+
+type User struct {
+	IPAddress string `json:"ip_address"`
+}
+
+type Chatroom struct {
+	Members map[string]*User `json:"members"`
+}
+
+func (pc *PhoxyConn) GetChatrooms() (map[string]*Chatroom, error) {
+	if !pc.AmIAuthorized() {
+		return nil, fmt.Errorf("Unauthorized")
+	}
+
+	r, err := http.Get(pc.APIURL("/chatrooms"))
+	if err != nil || r.StatusCode == 404 {
+		return nil, fmt.Errorf("unauthorized")
+	}
+
+	rsp := make(map[string]*Chatroom)
+	json.NewDecoder(r.Body).Decode(&rsp)
+	return rsp, nil
+}
+
+func (pc *PhoxyConn) ClearJail() error {
+	if !pc.AmIAuthorized() {
+		return fmt.Errorf("Unauthorized")
+	}
+
+	r, err := http.Get(pc.APIURL("/clear_jail"))
+	if err != nil || r.StatusCode == 404 {
+		return fmt.Errorf("unauthorized")
+	}
+
+	return nil
+}
+
+func (pc *PhoxyConn) Interrupt(chat, name string) error {
+	rsp, err := pc.GetChatrooms()
+	if err != nil {
+		return err
+	}
+
+	if c := rsp[chat]; c != nil {
+		if m := c.Members[name]; m != nil {
+			r, err := http.Get(pc.APIURL("/interrupt/" + m.IPAddress))
+			if err != nil || r.StatusCode == 404 {
+				return fmt.Errorf("unauthorized")
+			}
+		}
+	}
+
+	return fmt.Errorf("unauthorized")
+}
+
 type cleanupReport struct {
 	Status int    `json:"status"`
 	Error  string `json:"error"`
@@ -384,12 +475,12 @@ func (pc *PhoxyConn) Cleanup(chat string, time int64) (int, error) {
 	return cr.NamesCleaned, nil
 }
 
-func (pc *PhoxyConn) Lockdown(chat string) error {
+func (pc *PhoxyConn) Lockdown(chat, level string) error {
 	if !pc.AmIAuthorized() {
 		return fmt.Errorf("need api key")
 	}
 
-	r, err := http.Get(pc.APIURL("/lockdown/") + chat)
+	r, err := http.Get(pc.APIURL("/lockdown/") + chat + "/" + level)
 	if err != nil || r.StatusCode == 404 {
 		return fmt.Errorf("unauthorized")
 	}
@@ -418,18 +509,26 @@ func (pc *PhoxyConn) IsAuthorized(chat, name string) bool {
 		return false
 	}
 
+	return pc.AccessLevel(chat, name) > 4
+}
+
+func (pc *PhoxyConn) AccessLevel(chat, name string) int64 {
+	if !pc.AmIAuthorized() {
+		return -1
+	}
+
 	r, err := http.Get(pc.APIURL("/access_control/") + name + "/" + chat)
 	if err != nil || r.StatusCode != 200 {
-		return false
+		return -1
 	}
 
 	var a authorizedAnswer
 	err = json.NewDecoder(r.Body).Decode(&a)
 	if err != nil {
-		return false
+		return -1
 	}
 
-	return a.AccessLevel > 4
+	return a.AccessLevel
 }
 
 func (pc *PhoxyConn) BackendURL() string {

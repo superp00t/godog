@@ -1,15 +1,10 @@
 package main
 
 import (
-	"bytes"
 	crand "crypto/rand"
 	"encoding/binary"
-	"encoding/json"
-	"fmt"
-	"io"
 	"log"
 	"math/rand"
-	"net/http"
 	"path/filepath"
 	"strings"
 	"time"
@@ -70,30 +65,11 @@ func getRat(bot *phoxy.PhoxyConn) string {
 	}
 
 	timeOfLastRatQuery = time.Now().UnixNano()
-	client := &http.Client{}
 	for {
 		var rp ratPosts
-		req, err := http.NewRequest("GET", "https://www.reddit.com/r/RATS/top.json", nil)
+		err := getJSON("https://www.reddit.com/r/RATS/top.json", nil, &rp)
 		if err != nil {
-			log.Fatal(err)
-		}
-
-		req.Header.Set("User-Agent", "Mozilla/5.0 (Windows NT 6.1; rv:31.0) Gecko/20100101 Firefox/31.0")
-		r, err := client.Do(req)
-		if err != nil {
-			return ""
-		}
-
-		var buf bytes.Buffer
-		io.Copy(&buf, r.Body)
-		fmt.Println(buf.String())
-		err = json.Unmarshal(buf.Bytes(), &rp)
-		if err != nil {
-			return err.Error()
-		}
-		if rp.Error == 429 {
-			bot.GroupMessage("reddit returned 429 Too Many Requests. :(")
-			time.Sleep(interval)
+			log.Println(err)
 			continue
 		}
 

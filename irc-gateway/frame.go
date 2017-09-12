@@ -18,14 +18,22 @@ type UserFrame struct {
 	Name4        string
 }
 
+func getFrame(input []string, c int) string {
+	if c > len(input) {
+		return ""
+	}
+
+	return input[c]
+}
 func DeserializeUserFrame(input string) *UserFrame {
 	dob := strings.Split(input, " ")
-	return &UserFrame{
-		Name2: dob[1],
-		Name3: dob[2],
-		Host:  dob[3],
-		Name4: dob[4],
+	c := &UserFrame{
+		Name2: getFrame(dob, 1),
+		Name3: getFrame(dob, 2),
+		Host:  getFrame(dob, 3),
+		Name4: getFrame(dob, 4),
 	}
+	return c
 }
 
 func (f *Frame) SerializeToString() string {

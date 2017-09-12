@@ -65,7 +65,7 @@ lp:
 		case "JOIN":
 			go func(cmd []string) {
 				chatName := cmd[1][1:]
-				chatName = chatName[:len(chatName)-2]
+				chatName = chatName[:len(chatName)-1]
 				realName := chatName
 				endpoint := "https://ikrypto.club/phoxy/"
 
@@ -94,15 +94,15 @@ lp:
 				fp := hex.EncodeToString(s.B.Me.PublicKey[:])
 				s.Notice("AUTH", "Your mpOTR fingerprint is "+fp)
 
-				s.B.HandleFunc("userQuit", func(ev *phoxy.Event) {
+				s.B.HandleFunc(phoxy.USERQUIT, func(ev *phoxy.Event) {
 					fmt.Fprintf(s.C, ":%s!~_ QUIT :Quit: leaving\n", ev.Username)
 				})
 
-				s.B.HandleFunc("userJoin", func(ev *phoxy.Event) {
+				s.B.HandleFunc(phoxy.USERJOIN, func(ev *phoxy.Event) {
 					fmt.Fprintf(s.C, ":%s!~_ JOIN #%s\n", ev.Username, chatName)
 				})
 
-				s.B.HandleFunc("groupMessage", func(ev *phoxy.Event) {
+				s.B.HandleFunc(phoxy.GROUPMESSAGE, func(ev *phoxy.Event) {
 					stre := strings.Split(ev.Body, "\n")
 					for _, v := range stre {
 						fmt.Fprintf(s.C, ":%s!~_ PRIVMSG #%s :%s\n", ev.Username, chatName, v)
@@ -132,6 +132,7 @@ func NewSession(c net.Conn) {
 	s.Rdline = bufio.NewReader(c)
 	authFlags := 0
 
+ml:
 	for {
 		str, err := s.Rdline.ReadString('\n')
 		if err != nil {
@@ -156,6 +157,11 @@ func NewSession(c net.Conn) {
 		case "USER":
 			s.UF = DeserializeUserFrame(str)
 			authFlags++
+		case "QUIT":
+			break ml
+		default:
+			log.Println("Unknown")
+			break ml
 		}
 
 		Log(DEBUG, "Got data: %+v", s.UF)
@@ -165,6 +171,7 @@ func NewSession(c net.Conn) {
 			return
 		}
 	}
+	c.Close()
 }
 
 func main() {
