@@ -160,8 +160,7 @@ ml:
 		case "QUIT":
 			break ml
 		default:
-			log.Println("Unknown")
-			break ml
+			log.Println("Unknown command", elements[0])
 		}
 
 		Log(DEBUG, "Got data: %+v", s.UF)
