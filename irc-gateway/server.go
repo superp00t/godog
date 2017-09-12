@@ -65,7 +65,10 @@ lp:
 		case "JOIN":
 			go func(cmd []string) {
 				chatName := cmd[1][1:]
-				chatName = chatName[:len(chatName)-1]
+
+				chatName = strings.TrimRight(chatName, string([]byte{13, 10}))
+				log.Println(chatName)
+				log.Println([]byte(chatName))
 				realName := chatName
 				endpoint := "https://ikrypto.club/phoxy/"
 
