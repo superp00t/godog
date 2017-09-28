@@ -37,16 +37,24 @@ func main() {
 	driver := pflag.StringP("driver", "r", "mysql", "SQL driver")
 	db := pflag.StringP("db", "d", "", "SQL database")
 
-	mainCD := pflag.BoolP("maincd", "m", false, "connect to the standard XMPP BOSH server")
+	endpoint := pflag.StringP("endpoint", "e", "https://ikrypto.club/phoxy/", "connect to the standard XMPP BOSH server")
 	logEvents := pflag.BoolP("log_events", "l", false, "log Phoxy events")
+	bf := pflag.BoolP("be_filter", "b", false, "filter spam")
 	api := pflag.StringP("http_listen", "h", "", "spin up HTTP management server")
 	msg := pflag.StringP("msg", "s", "", "greeting message")
 
 	pflag.Parse()
-
-	opts := []phoxy.Opts{
-		{phoxy.PHOXY, *name, "lobby", "https://ikrypto.club/phoxy/", *ap, "", "", false},
-		{phoxy.BOSH, *name, "lobby", "https://crypto.dog/http-bind/", *ap, "", "", false},
+	protocol := phoxy.PHOXY
+	if strings.HasSuffix(*endpoint, "http-bind/") {
+		protocol = phoxy.BOSH
+	}
+	opts := phoxy.Opts{
+		Type:     protocol,
+		Username: *name,
+		Chatroom: "lobby",
+		Endpoint: *endpoint,
+		APIKey:   *ap,
+		BeFilter: *bf,
 	}
 
 	if *db != "" {
@@ -87,12 +95,7 @@ func main() {
 		}()
 	}
 
-	sel := 0
-	if *mainCD {
-		sel = 1
-	}
-
-	b, err := phoxy.New(&opts[sel])
+	b, err := phoxy.New(&opts)
 	if err != nil {
 		log.Fatal(err)
 	}
@@ -153,7 +156,8 @@ func main() {
 		if len(c.Args) == 0 {
 			return "usage: lockdown <level>"
 		}
-		if b.IsAuthorized(b.Opts.Chatroom, c.From) {
+
+		if b.AccessLevel(b.Opts.Chatroom, c.From) > 2 {
 			b.Lockdown(b.Opts.Chatroom, c.Args[0])
 			return ""
 		}
@@ -180,7 +184,7 @@ func main() {
 	})
 
 	cmd.Add("set_topic", "sets the topic", func(c *CmdCall) string {
-		if b.AccessLevel(b.Opts.Chatroom, c.From) < 2 {
+		if b.Opts.Type == phoxy.PHOXY && b.AccessLevel(b.Opts.Chatroom, c.From) < 2 {
 			return unAuthMsg
 		}
 
@@ -195,7 +199,14 @@ func main() {
 
 	// Fun functions
 	cmd.Add("ratpost", "Queries a random rat from Reddit", func(c *CmdCall) string {
-		return getRat(b)
+		if b.AccessLevel(b.Opts.Chatroom, c.From) < 3 {
+			return unAuthMsg
+		}
+
+		if len(c.Args) != 0 {
+			return getRat(b, c.Args[0])
+		}
+		return getRat(b, "")
 	})
 
 	cmd.Add("quote", "Selects a random quote from https://ikrypto.club/quotes/", func(c *CmdCall) string {
@@ -281,6 +292,12 @@ func main() {
 		t := time.Now()
 		fmt.Printf("[%d:%d:%d]\t<%s>\t%s\n", t.Hour(), t.Minute(), t.Second(), ev.Username, ev.Body)
 
+		// if IsSpam(ev.Body) {
+		// 	b.Interrupt(b.Opts.Chatroom, ev.Username)
+		// 	log.Println("Removing spam")
+		// 	return
+		// }
+
 		if ev.Body == "." {
 			b.GroupMessage(".")
 			return
@@ -300,6 +317,17 @@ func main() {
 		msg := cmd.Parse(false, ev.Username, ev.Body)
 		if msg != "" {
 			b.GroupMessage(msg)
+		}
+	})
+
+	b.HandleFunc(phoxy.VERIFY, func(ev *phoxy.Event) {
+		isp := IsSpam(ev.Username, ev.Body)
+		ev.Callback <- !isp
+		log.Println(ev.Body)
+		log.Println("Is spam", isp)
+		if isp {
+			log.Println("Banning", ev.Username)
+			b.Interrupt(b.Opts.Chatroom, ev.Username)
 		}
 	})
 
@@ -363,6 +391,7 @@ func getJSON(uri string, queryP map[string]string, v interface{}) error {
 	if err != nil {
 		log.Fatal(err)
 	}
+	log.Println(uri)
 
 	req.Header.Set("User-Agent", "Mozilla/5.0 (Windows NT 6.1; rv:31.0) Gecko/20100101 Firefox/31.0")
 	client := &http.Client{}
@@ -377,5 +406,6 @@ func getJSON(uri string, queryP map[string]string, v interface{}) error {
 
 	var buf bytes.Buffer
 	io.Copy(&buf, r.Body)
+	// log.Println(buf.String())
 	return json.Unmarshal(buf.Bytes(), &v)
 }

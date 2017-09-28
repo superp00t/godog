@@ -6,6 +6,7 @@ import (
 	"crypto/rand"
 	"encoding/json"
 	"fmt"
+	"log"
 	"net/http"
 	"strings"
 
@@ -35,6 +36,7 @@ const (
 	USERQUIT
 	GROUPMESSAGE
 	PRIVATEMESSAGE
+	VERIFY
 )
 
 type OTRMessage struct {
@@ -46,6 +48,8 @@ type Packet struct {
 	Chatroom string           `json:"chatroom,omitempty"`
 	Nickname string           `json:"nickname,omitempty"`
 	Object   *json.RawMessage `json:"object,omitempty"`
+	ID       string           `jsoh:"id,omitempty"`
+	Verified bool             `json:"verified"`
 }
 
 func (p Packet) Encode() string {
@@ -59,6 +63,7 @@ type Event struct {
 	Username string       `json:"username" xorm:"'username'"`
 	Body     string       `json:"body" xorm:"longtext 'body'"`
 	At       int64        `json:"at" xorm:"'at'"`
+	Callback chan bool    `json:"-" xorm:"-"`
 }
 
 type HandlerFunc func(*Event)
@@ -96,6 +101,7 @@ type Opts struct {
 	OTRPrivateKey   string
 
 	SpamTesting bool
+	BeFilter    bool
 }
 
 func urlEncode(inp []byte) string {
@@ -197,6 +203,7 @@ func (pc *PhoxyConn) Connect() error {
 			Type:     "join_chat",
 			Chatroom: pc.Opts.Chatroom,
 			Nickname: pc.Opts.Username,
+			Verified: pc.Opts.BeFilter,
 		})
 
 		go func() {
@@ -215,6 +222,36 @@ func (pc *PhoxyConn) Connect() error {
 				}
 
 				switch pkt.Type {
+				case "verify_message":
+					msgb, err := pc.Me.ReceiveMessage(pkt.Nickname, string(*pkt.Object))
+					if err != nil {
+						continue
+					}
+					if msgb != nil {
+						var msgo2 MessageObject
+						json.Unmarshal(msgb, &msgo2)
+						cb := make(chan bool)
+						go func(cb chan bool, id string, msgg MessageObject, usr string) {
+							v := <-cb
+							log.Println("Sending verified response", v, msgg.Type)
+							pc.Send(Packet{
+								Type:     "verify_response",
+								ID:       id,
+								Verified: v,
+							})
+							if v == true && msgg.Type == "message" {
+								pc.CallFunc(GROUPMESSAGE, &Event{
+									Username: usr,
+									Body:     msgg.Body,
+								})
+							}
+						}(cb, pkt.ID, msgo2, pkt.Nickname)
+						pc.CallFunc(VERIFY, &Event{
+							Username: pkt.Nickname,
+							Body:     msgo2.Body,
+							Callback: cb,
+						})
+					}
 				case "user_join":
 					pc.CallFunc(USERJOIN, &Event{
 						Username: pkt.Nickname,
@@ -226,6 +263,7 @@ func (pc *PhoxyConn) Connect() error {
 						continue
 					}
 					if msgb != nil {
+						log.Println("Received message from", pkt.Nickname)
 						var msgo2 MessageObject
 						json.Unmarshal(msgb, &msgo2)
 						pc.CallFunc(GROUPMESSAGE, &Event{

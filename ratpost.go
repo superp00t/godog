@@ -1,10 +1,8 @@
 package main
 
 import (
-	crand "crypto/rand"
-	"encoding/binary"
 	"log"
-	"math/rand"
+	"net/url"
 	"path/filepath"
 	"strings"
 	"time"
@@ -18,7 +16,7 @@ type ratChildData struct {
 }
 
 type ratChild struct {
-	Data ratChildData `json"data"`
+	Data ratChildData `json:"data"`
 }
 
 type ratData struct {
@@ -36,41 +34,65 @@ var timeOfLastRatQuery int64
 var alreadySent = make(map[string]bool)
 
 func getRandomRat() string {
-	for {
-		buf := make([]byte, 8)
-		crand.Read(buf)
-		in := binary.LittleEndian.Uint64(buf)
-		rng := rand.New(rand.NewSource(int64(in)))
-		ratc := rats[rng.Intn(len(rats))]
-		rat := ratc.Data.URL
+	errors := 0
+	for _, v := range rats {
+		if errors > 8 {
+			return "No posts found"
+		}
+
+		rat := v.Data.URL
 		if alreadySent[rat] == true {
 			continue
 		}
 
 		ext := filepath.Ext(rat)
-		if (strings.HasPrefix(rat, "https://imgur.com") || ext == ".jpeg" || ext == ".jpg" || ext == ".png") == false {
+		p, err := url.Parse(rat)
+		if err != nil {
+			errors++
 			continue
 		}
+
+		if (ext == "webm" || p.Host == "gfycat.com" || p.Host == "imgur.com" || p.Host == "i.reddit.com" || p.Host == "i.imgur.com" || ext == ".jpeg" || ext == ".jpg" || ext == ".png" || strings.HasSuffix(rat, "jpg") || strings.HasSuffix(rat, "jpeg") || strings.Contains(rat, "jpg?")) == false {
+			errors++
+			continue
+		}
+
+		log.Println(rat)
 
 		alreadySent[rat] = true
 		return rat
 	}
+
+	return "No valid posts found"
 }
 
-func getRat(bot *phoxy.PhoxyConn) string {
+var lastSR string
+
+func getRat(bot *phoxy.PhoxyConn, param string) string {
+	reddit := "/r/RATS"
+	if param != "" {
+		reddit = "/r/" + param
+	}
 	interval := time.Second * 40
-	if timeOfLastRatQuery > time.Now().UnixNano()-(interval).Nanoseconds() {
+
+	if timeOfLastRatQuery > time.Now().UnixNano()-(interval).Nanoseconds() && lastSR == reddit {
 		log.Println("Ratpost attempt is too recent")
 		return getRandomRat()
 	}
 
+	lastSR = reddit
+
 	timeOfLastRatQuery = time.Now().UnixNano()
 	for {
 		var rp ratPosts
-		err := getJSON("https://www.reddit.com/r/RATS/top.json", nil, &rp)
+		err := getJSON("https://www.reddit.com"+reddit+"/top.json", nil, &rp)
 		if err != nil {
 			log.Println(err)
-			continue
+			return err.Error()
+		}
+
+		if len(rp.Data.Children) == 0 {
+			return "No posts found."
 		}
 
 		rats = rp.Data.Children
