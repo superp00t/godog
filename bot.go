@@ -286,7 +286,6 @@ func main() {
 	})
 
 	cmd.Add("help", "shows this message", func(c *CmdCall) string {
-		log.Println("help called")
 		buf := new(bytes.Buffer)
 		table := tablewriter.NewWriter(buf)
 		table.SetHeader([]string{"Command", "Description"})
