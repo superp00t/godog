@@ -22,6 +22,7 @@ import (
 	"github.com/ogier/pflag"
 	"github.com/olekukonko/tablewriter"
 	"github.com/superp00t/godog/phoxy"
+        "github.com/dpatrie/urbandictionary"
 
 	_ "github.com/go-sql-driver/mysql"
 )
@@ -207,6 +208,25 @@ func main() {
 			return getRat(b, c.Args[0])
 		}
 		return getRat(b, "")
+	})
+
+	cmd.Add("urbandict", "Searches a term on the Urban Dictionary", func(c *CmdCall) string {
+		if len(c.Args) == 0 {
+			return "usage: urbandict <searchterm>"
+		}
+
+		searchterm := c.Args[0]
+		
+		UDresponse, err := urbandictionary.Query(searchterm)
+		if err != nil{
+			return err.Error()
+		}
+		
+		if len(UDresponse.Results) == 0 {
+			return "No definition found"
+		}
+
+		return UDresponse.Results[0].Definition
 	})
 
 	cmd.Add("quote", "Selects a random quote from https://ikrypto.club/quotes/", func(c *CmdCall) string {
