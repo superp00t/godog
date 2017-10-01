@@ -17,12 +17,12 @@ import (
 	"strings"
 
 	csay "github.com/dhruvbird/go-cowsay"
+	"github.com/dpatrie/urbandictionary"
 	"github.com/go-xorm/xorm"
 	"github.com/gorilla/mux"
 	"github.com/ogier/pflag"
 	"github.com/olekukonko/tablewriter"
 	"github.com/superp00t/godog/phoxy"
-        "github.com/dpatrie/urbandictionary"
 
 	_ "github.com/go-sql-driver/mysql"
 )
@@ -215,13 +215,13 @@ func main() {
 			return "usage: urbandict <searchterm>"
 		}
 
-		searchterm := c.Args[0]
-		
+		searchterm := strings.Join(c.Args, " ")
+
 		UDresponse, err := urbandictionary.Query(searchterm)
-		if err != nil{
+		if err != nil {
 			return err.Error()
 		}
-		
+
 		if len(UDresponse.Results) == 0 {
 			return "No definition found"
 		}
