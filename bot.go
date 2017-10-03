@@ -10,6 +10,7 @@ import (
 	"net/url"
 	"sort"
 	"strconv"
+	"sync"
 	"time"
 
 	"encoding/json"
@@ -322,6 +323,17 @@ func main() {
 		return "```" + buf.String()
 	})
 
+	IsABot := make(map[string]bool)
+	Rates := make(map[string]int64)
+	BotL := new(sync.Mutex)
+	go func() {
+		for {
+			time.Sleep(60 * time.Second)
+			BotL.Lock()
+			Rates = make(map[string]int64)
+		}
+	}()
+
 	b.HandleFunc(phoxy.GROUPMESSAGE, func(ev *phoxy.Event) {
 		t := time.Now()
 		fmt.Printf("[%d:%d:%d]\t<%s>\t%s\n", t.Hour(), t.Minute(), t.Second(), ev.Username, ev.Body)
@@ -331,6 +343,22 @@ func main() {
 		// 	log.Println("Removing spam")
 		// 	return
 		// }
+		BotL.Lock()
+		Rates[ev.Username] += int64(len(ev.Body))
+		if Rates[ev.Username] > 1000 {
+			IsABot[ev.Username] = true
+		}
+
+		if strings.HasPrefix(ev.Body, "+bot") {
+			IsABot[ev.Username] = true
+		}
+
+		if IsABot[ev.Username] {
+			BotL.Unlock()
+			return
+		}
+
+		BotL.Unlock()
 
 		if ev.Body == "." {
 			b.GroupMessage(".")
@@ -382,8 +410,13 @@ func main() {
 			b.GroupMessage(*msg)
 			return
 		}
-		b.Groupf("Hey, %s! The topic of this conversation is %s", ev.Username, topic)
+		b.Groupf("+bot Hey, %s! The topic of this conversation is %s", ev.Username, topic)
 	})
+
+	go func() {
+		time.Sleep(5 * time.Second)
+		b.GroupMessage("+bot")
+	}()
 
 	err = b.Connect()
 	log.Fatal("Error connecting,", err)
