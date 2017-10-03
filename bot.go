@@ -331,6 +331,7 @@ func main() {
 			time.Sleep(60 * time.Second)
 			BotL.Lock()
 			Rates = make(map[string]int64)
+			BotL.Unlock()
 		}
 	}()
 
