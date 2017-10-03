@@ -19,6 +19,7 @@ import (
 	"time"
 
 	"github.com/superp00t/godog/multiparty"
+	"github.com/superp00t/godog/xmpp"
 	"github.com/superp00t/godog/xmpp/bosh"
 )
 
@@ -27,6 +28,7 @@ type ConnType int
 const (
 	PHOXY ConnType = iota
 	BOSH
+	WS
 )
 
 type HandlerField int
@@ -71,6 +73,7 @@ type HandlerFunc func(*Event)
 type PhoxyConn struct {
 	Conn *websocket.Conn
 	BC   *bosh.Conn
+	WS   *xmpp.Client
 	Me   *multiparty.Me
 
 	APIKey   string
@@ -80,6 +83,8 @@ type PhoxyConn struct {
 	Opts   *Opts
 	Errc   chan error
 
+	AlreadyJoined map[string]bool
+
 	Closed bool
 	PM     map[string]*otr.Conversation
 
@@ -87,8 +92,9 @@ type PhoxyConn struct {
 }
 
 type MessageObject struct {
-	Type string `json:"type,omitempty"`
-	Body string `json:"body,omitempty"`
+	Type  string `json:"type,omitempty"`
+	Body  string `json:"body,omitempty"`
+	Value string `json:"value,omitempty"`
 }
 
 type Opts struct {
@@ -119,6 +125,7 @@ func New(o *Opts) (*PhoxyConn, error) {
 	pc.Errc = make(chan error, 10)
 	pc.PM = make(map[string]*otr.Conversation)
 	pc.Handlers = make(map[HandlerField]*HandlerFunc)
+	pc.AlreadyJoined = make(map[string]bool)
 	ok := new(otr.PrivateKey)
 	if o.OTRPrivateKey == "" {
 		ok.Generate(rand.Reader)
@@ -151,6 +158,23 @@ func (pc *PhoxyConn) Intercept(f func(*Event)) {
 	pc.interceptor = f
 }
 
+func (pc *PhoxyConn) SendColor(color string) {
+	if pc.Opts.Type == PHOXY {
+		msgo := MessageObject{
+			Type:  "change_color",
+			Value: color,
+		}
+		dat, _ := json.Marshal(msgo)
+		enc := pc.Me.SendMessage(dat)
+		h := json.RawMessage(string(enc))
+		pc.Send(Packet{
+			Type:     "groupchat",
+			Chatroom: pc.Opts.Chatroom,
+			Object:   &h,
+		})
+	}
+}
+
 func (pc *PhoxyConn) SendPublicKey(nick string) {
 	str := pc.Me.SendPublicKey(nick)
 	go func() {
@@ -159,6 +183,10 @@ func (pc *PhoxyConn) SendPublicKey(nick string) {
 			if pc.BC != nil {
 				pc.BC.SendGroupMessage(str)
 			}
+		}
+
+		if pc.Opts.Type == WS {
+			pc.WS.SendMessage(pc.Opts.Chatroom+"@conference.crypto.dog", "groupchat", pc.Me.SendPublicKey(nick))
 		}
 
 		if pc.Opts.Type == PHOXY {
@@ -172,6 +200,59 @@ func (pc *PhoxyConn) SendPublicKey(nick string) {
 	}()
 }
 func (pc *PhoxyConn) Connect() error {
+	if pc.Opts.Type == WS {
+		conference := "crypto.dog"
+		c, err := xmpp.Opts{
+			WSURL: pc.Opts.Endpoint,
+			Host:  conference,
+		}.Connect()
+		if err != nil {
+			return err
+		}
+
+		c.JoinMUC(pc.Opts.Chatroom+"@conference."+conference, pc.Opts.Username)
+
+		go func() {
+			for {
+				pc.WS = c
+				i, err := c.Recv()
+				if err != nil {
+					pc.Errc <- err
+				}
+
+				switch i.(type) {
+				case xmpp.Presence:
+					pres := i.(xmpp.Presence)
+					chatname := strings.Split(pres.From, "/")[1]
+					if pres.Type == "unavailable" {
+						pc.Me.DestroyUser(chatname)
+						pc.CallFunc(USERQUIT, &Event{
+							Username: chatname,
+						})
+					} else {
+						pc.SendPublicKey(chatname)
+						pc.CallFunc(USERJOIN, &Event{
+							Username: chatname,
+						})
+					}
+				case xmpp.Message:
+					msg := i.(xmpp.Message)
+					chatname := strings.Split(msg.From, "/")[1]
+					decrypted, err := pc.Me.ReceiveMessage(chatname, msg.Body)
+					if err != nil {
+						continue
+					}
+					if len(decrypted) != 0 {
+						pc.CallFunc(GROUPMESSAGE, &Event{
+							Username: chatname,
+							Body:     string(decrypted),
+						})
+					}
+				}
+			}
+		}()
+	}
+
 	if pc.Opts.Type == PHOXY {
 		var err error
 		R, S, err := dsa.Sign(rand.Reader, &pc.OTRKey.PrivateKey, []byte("login"))
@@ -354,6 +435,16 @@ func (pc *PhoxyConn) Connect() error {
 }
 
 func (pc *PhoxyConn) CallFunc(typ HandlerField, msg *Event) {
+	if typ == USERJOIN && pc.AlreadyJoined[msg.Username] == true {
+		return
+	} else {
+		pc.AlreadyJoined[msg.Username] = true
+	}
+
+	if typ == USERQUIT {
+		pc.AlreadyJoined[msg.Username] = false
+	}
+
 	msg.Type = typ
 	msg.At = time.Now().UnixNano()
 	if pc.interceptor != nil {
@@ -385,6 +476,13 @@ func (pc *PhoxyConn) GroupMessage(body string) {
 	if pc.Opts.Type == BOSH {
 		if pc.BC != nil {
 			pc.BC.SendGroupMessage(pc.Me.SendMessage([]byte(body)))
+		}
+		return
+	}
+
+	if pc.Opts.Type == WS {
+		if pc.WS != nil {
+			pc.WS.SendMessage(pc.Opts.Chatroom+"@conference.crypto.dog", "groupchat", pc.Me.SendMessage([]byte(body)))
 		}
 		return
 	}

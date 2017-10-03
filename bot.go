@@ -49,6 +49,10 @@ func main() {
 	if strings.HasSuffix(*endpoint, "http-bind/") {
 		protocol = phoxy.BOSH
 	}
+
+	if strings.HasPrefix(*endpoint, "wss://") {
+		protocol = phoxy.WS
+	}
 	opts := phoxy.Opts{
 		Type:     protocol,
 		Username: *name,
@@ -112,7 +116,7 @@ func main() {
 	cmd := NewCmdParser()
 	topic := "No topic yet"
 	unAuthMsg := "You are not authorized to perform this action."
-
+	color := "#000000"
 	cmd.Add("ban", "bans a user", func(c *CmdCall) string {
 		if len(c.Args) < 1 {
 			return "usage: .ban <username>"
@@ -285,6 +289,16 @@ func main() {
 		return ""
 	})
 
+	cmd.Add("set_color", "sets the bot's color", func(c *CmdCall) string {
+		if len(c.Args) < 1 {
+			return "usage: set_color <hex color>"
+		}
+
+		color = c.Args[0]
+		b.SendColor(color)
+		return ""
+	})
+
 	cmd.Add("help", "shows this message", func(c *CmdCall) string {
 		buf := new(bytes.Buffer)
 		table := tablewriter.NewWriter(buf)
@@ -356,6 +370,7 @@ func main() {
 			return
 		}
 
+		b.SendColor(color)
 		// Don't bother currently logged in users
 		if start.UnixNano() > (time.Now().UnixNano() - (10 * time.Second).Nanoseconds()) {
 			return
