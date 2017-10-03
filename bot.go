@@ -345,7 +345,7 @@ func main() {
 		// }
 		BotL.Lock()
 		Rates[ev.Username] += int64(len(ev.Body))
-		if Rates[ev.Username] > 1000 {
+		if Rates[ev.Username] > 5000 {
 			IsABot[ev.Username] = true
 		}
 
@@ -358,12 +358,14 @@ func main() {
 			return
 		}
 
-		BotL.Unlock()
-
 		if ev.Body == "." {
 			b.GroupMessage(".")
+			Rates[ev.Username] += 500
+			BotL.Unlock()
 			return
 		}
+
+		BotL.Unlock()
 
 		u, err := url.Parse(ev.Body)
 		if err == nil {
