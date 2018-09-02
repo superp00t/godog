@@ -5,22 +5,18 @@
 This is a general-purpose API for writing programs that interact with Cryptodog.
 
 The multiparty implementation has been mostly a line-by-line translation from Cryptodog's, with some help from the protocol spec. However, I cannot guarantee that it is a safe one.
-```
-$ go get -u github.com/superp00t/godog
-$ $GOPATH/bin/godog -a [phoxy api key]
-```
 
 ## API usage
-### Connection (Phoxy WebSocket Protocol) 
+### Connection (Cryptodog XMPP+WebSocket Protocol) 
 ```go
 
 import "github.com/superp00t/godog/phoxy"
 
 opts := phoxy.Opts {
-    Type:     phoxy.PHOXY,
+    Type:     phoxy.WS,
     Username: "username",
     Chatroom: "lobby",
-    Endpoint: "https://ikrypto.club/phoxy/",
+    Endpoint: "wss://crypto.dog/websocket",
 }
 
 conn, err := phoxy.New(&opts)
