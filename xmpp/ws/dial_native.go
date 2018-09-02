@@ -2,7 +2,13 @@
 
 package ws
 
-import "golang.org/x/net/websocket"
+import (
+	"fmt"
+	"sync"
+
+	"github.com/gorilla/websocket"
+	"golang.org/x/net/proxy"
+)
 
 type NativeConn struct {
 	StatusCode int
@@ -11,6 +17,8 @@ type NativeConn struct {
 
 	RecvChan chan string
 	Die      chan error
+
+	l *sync.Mutex
 }
 
 func (jc *NativeConn) Status() int {
@@ -31,24 +39,43 @@ func (jc *NativeConn) Recv() (string, error) {
 }
 
 func (jc *NativeConn) Send(data string) error {
-	return websocket.Message.Send(jc.Conn, data)
+	defer jc.l.Unlock()
+	jc.l.Lock()
+	return jc.Conn.WriteMessage(websocket.TextMessage, []byte(data))
 }
 
-func DialConn(url string) (Conn, error) {
+func DialConn(url string, proxyaddr string) (Conn, error) {
 	jc := &NativeConn{}
 	jc.RecvChan = make(chan string, 16)
 	jc.Die = make(chan error)
-	ws, err := websocket.Dial(url, "xmpp", "http://localhost/")
-	if err != nil {
-		return nil, err
+	var ws *websocket.Conn
+	jc.l = new(sync.Mutex)
+
+	if proxyaddr != "" {
+		fmt.Println("Connecting with proxy", proxyaddr)
+		netDialer, err := proxy.SOCKS5("tcp", proxyaddr, nil, proxy.Direct)
+		if err != nil {
+			return nil, err
+		}
+		dialer := websocket.Dialer{NetDial: netDialer.Dial}
+		ws, _, err = dialer.Dial(url, nil)
+		if err != nil {
+			return nil, err
+		}
+	} else {
+		var err error
+		ws, _, err = websocket.DefaultDialer.Dial(url, nil)
+		if err != nil {
+			return nil, err
+		}
 	}
 
 	jc.Conn = ws
 
 	go func() {
 		for {
-			var buf string
-			err := websocket.Message.Receive(jc.Conn, &buf)
+			_, b, err := ws.ReadMessage()
+			buf := string(b)
 			if err != nil {
 				jc.Die <- err
 				break

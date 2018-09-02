@@ -4,11 +4,13 @@ import (
 	"bytes"
 	"crypto/dsa"
 	"crypto/rand"
+	"encoding/hex"
 	"encoding/json"
 	"fmt"
 	"log"
 	"net/http"
 	"strings"
+	"sync"
 
 	"golang.org/x/crypto/otr"
 	"golang.org/x/net/websocket"
@@ -20,7 +22,6 @@ import (
 
 	"github.com/superp00t/godog/multiparty"
 	"github.com/superp00t/godog/xmpp"
-	"github.com/superp00t/godog/xmpp/bosh"
 )
 
 type ConnType int
@@ -39,6 +40,12 @@ const (
 	GROUPMESSAGE
 	PRIVATEMESSAGE
 	VERIFY
+	AUTHSUCCESS
+	AUTHFAIL
+	JOINED
+	USERCONNECT
+	COMPOSING
+	PAUSED
 )
 
 type OTRMessage struct {
@@ -72,7 +79,6 @@ type HandlerFunc func(*Event)
 
 type PhoxyConn struct {
 	Conn *websocket.Conn
-	BC   *bosh.Conn
 	WS   *xmpp.Client
 	Me   *multiparty.Me
 
@@ -85,10 +91,16 @@ type PhoxyConn struct {
 
 	AlreadyJoined map[string]bool
 
-	Closed bool
-	PM     map[string]*otr.Conversation
+	Closed         bool
+	PM             map[string]*otr.Conversation
+	PML            *sync.Mutex
+	Start          time.Time
+	init, recvinit bool
+	interceptor    func(*Event)
 
-	interceptor func(*Event)
+	allIsWell    bool
+	asLock       *sync.Mutex
+	userJoinSent map[string]bool
 }
 
 type MessageObject struct {
@@ -102,6 +114,7 @@ type Opts struct {
 	Username, Chatroom string
 	Endpoint           string
 
+	Proxy           string
 	APIKey          string
 	MpOTRPrivateKey string
 	OTRPrivateKey   string
@@ -124,8 +137,12 @@ func New(o *Opts) (*PhoxyConn, error) {
 	pc := new(PhoxyConn)
 	pc.Errc = make(chan error, 10)
 	pc.PM = make(map[string]*otr.Conversation)
+	pc.PML = new(sync.Mutex)
+	pc.asLock = new(sync.Mutex)
 	pc.Handlers = make(map[HandlerField]*HandlerFunc)
 	pc.AlreadyJoined = make(map[string]bool)
+	pc.userJoinSent = make(map[string]bool)
+	pc.Start = time.Now()
 	ok := new(otr.PrivateKey)
 	if o.OTRPrivateKey == "" {
 		ok.Generate(rand.Reader)
@@ -150,6 +167,10 @@ func New(o *Opts) (*PhoxyConn, error) {
 	if err != nil {
 		return nil, err
 	}
+
+	pc.Me.MessageSender(func(b []byte) {
+		pc.SendRawGroupMessage(string(b))
+	})
 
 	return pc, nil
 }
@@ -176,48 +197,206 @@ func (pc *PhoxyConn) SendColor(color string) {
 }
 
 func (pc *PhoxyConn) SendPublicKey(nick string) {
-	str := pc.Me.SendPublicKey(nick)
-	go func() {
-		time.Sleep(300 * time.Millisecond)
-		if pc.Opts.Type == BOSH {
-			if pc.BC != nil {
-				pc.BC.SendGroupMessage(str)
-			}
+	pc.Me.TransmitPublicKey(nick)
+}
+
+func (pc *PhoxyConn) SendRawPrivateMessage(to string, body string) {
+	if pc.Opts.Type == PHOXY {
+		obj := MessageObject{
+			Type: "chat",
+			Body: body,
 		}
 
-		if pc.Opts.Type == WS {
-			pc.WS.SendMessage(pc.Opts.Chatroom+"@conference.crypto.dog", "groupchat", pc.Me.SendPublicKey(nick))
+		dat, _ := json.Marshal(obj)
+		obje := json.RawMessage(dat)
+		pc.Send(Packet{
+			Type:     "chat",
+			Chatroom: pc.Opts.Chatroom,
+			Nickname: to,
+			Object:   &obje,
+		})
+		return
+	}
+
+	if pc.Opts.Type == WS && pc.WS != nil {
+		pc.WS.SendMessage(pc.Opts.Chatroom+"@conference.crypto.dog/"+to, "chat", body)
+	}
+}
+
+func (pc *PhoxyConn) SendPrivateMessage(to string, body string, errct int) {
+	if errct > 3 {
+		return
+	}
+	pc.PML.Lock()
+	c := pc.PM[to]
+	pc.PML.Unlock()
+	if c == nil {
+		go func() {
+			time.Sleep(500 * time.Millisecond)
+			pc.SendPrivateMessage(to, body, errct+1)
+		}()
+		return
+	}
+
+	d, _ := c.Send([]byte(body))
+
+	for _, v := range d {
+		pc.SendRawPrivateMessage(to, string(v))
+	}
+}
+
+func (pc *PhoxyConn) SendChallenge(to string, question string, answer string) {
+	pc.PML.Lock()
+	c := pc.PM[to]
+	pc.PML.Unlock()
+	if c == nil {
+		pc.SendRawPrivateMessage(to, "?OTRv2?")
+		return
+	}
+
+	bmpf := pc.Me.FP(to)
+	answer = pc.prepareAnswer(answer, true, bmpf)
+	d, err := c.Authenticate(question, []byte(answer))
+	if err != nil {
+		log.Println(err)
+	}
+	for _, v := range d {
+		pc.SendRawPrivateMessage(to, string(v))
+	}
+}
+
+func (pc *PhoxyConn) OTRFingerprint(user string) string {
+	errs := 0
+	for {
+		if errs > 5 {
+			return ""
+		}
+		pc.PML.Lock()
+		c := pc.PM[user]
+		if c == nil {
+			errs++
+			pc.PML.Unlock()
+			time.Sleep(300 * time.Millisecond)
+			continue
+		}
+		pc.PML.Unlock()
+		if c == nil {
+			return ""
+		}
+		return strings.ToUpper(hex.EncodeToString(c.TheirPublicKey.Fingerprint()))
+	}
+}
+
+func (pc *PhoxyConn) prepareAnswer(answer string, ask bool, buddyMpFingerprint string) string {
+	first := ""
+	second := ""
+	answer = strings.ToLower(answer)
+	for _, v := range []rune(".,'\";?!") {
+		answer = strings.Replace(answer, string(v), "", -1)
+	}
+	mee := pc.Me.FP("")
+
+	if buddyMpFingerprint != "" {
+		if ask {
+			first = mee
+		} else {
+			first = buddyMpFingerprint
 		}
 
-		if pc.Opts.Type == PHOXY {
-			h := json.RawMessage(str)
-			pc.Send(Packet{
-				Type:     "groupchat",
-				Chatroom: pc.Opts.Chatroom,
-				Object:   &h,
+		if ask {
+			second = buddyMpFingerprint
+		} else {
+			second = mee
+		}
+
+		answer += ";" + first + ";" + second
+	}
+
+	return answer
+}
+
+func (pc *PhoxyConn) HandleOTRMessage(from string, body string) {
+	var cnv *otr.Conversation
+	pc.PML.Lock()
+	if cnv = pc.PM[from]; cnv == nil {
+		cnv = new(otr.Conversation)
+		cnv.PrivateKey = pc.OTRKey
+		cnv.Rand = rand.Reader
+		cnv.FragmentSize = 0
+		pc.PM[from] = cnv
+	}
+	pc.PML.Unlock()
+
+	out, _, chg, toSend, err := cnv.Receive([]byte(body))
+
+	if chg == otr.SMPComplete {
+		pc.CallFunc(AUTHSUCCESS, &Event{
+			Username: from,
+		})
+	} else if chg == otr.SMPFailed {
+		pc.CallFunc(AUTHFAIL, &Event{
+			Username: from,
+		})
+	}
+
+	if toSend != nil {
+		for _, v := range toSend {
+			pc.SendRawPrivateMessage(from, string(v))
+		}
+	}
+
+	if err == nil {
+		if out != nil {
+			pc.CallFunc(PRIVATEMESSAGE, &Event{
+				Username: from,
+				Body:     string(out),
 			})
+		}
+	}
+}
+
+func (pc *PhoxyConn) Fingerprint(u string) string {
+	s, _ := pc.Me.FingerprintUser(u)
+	return s
+}
+
+func (pc *PhoxyConn) waitUntilAuth(u string, cb func()) {
+	go func() {
+		for {
+			kws := pc.Me.KeyWasSent(u)
+			if pc.Me.FP(u) != "" && kws {
+				cb()
+				return
+			} else {
+				time.Sleep(500 * time.Millisecond)
+			}
 		}
 	}()
 }
+
 func (pc *PhoxyConn) Connect() error {
 	if pc.Opts.Type == WS {
 		conference := "crypto.dog"
 		c, err := xmpp.Opts{
 			WSURL: pc.Opts.Endpoint,
 			Host:  conference,
+			Debug: false,
+			Proxy: pc.Opts.Proxy,
 		}.Connect()
 		if err != nil {
 			return err
 		}
 
 		c.JoinMUC(pc.Opts.Chatroom+"@conference."+conference, pc.Opts.Username)
-
+		sent := make(map[string]bool)
 		go func() {
 			for {
 				pc.WS = c
 				i, err := c.Recv()
 				if err != nil {
-					pc.Errc <- err
+					if (err.Error() == "That nickname is already in use by another occupant" || err.Error() == "Only occupants are allowed to send messages to the conference") == false {
+						pc.Errc <- err
+					}
 				}
 
 				switch i.(type) {
@@ -225,28 +404,50 @@ func (pc *PhoxyConn) Connect() error {
 					pres := i.(xmpp.Presence)
 					chatname := strings.Split(pres.From, "/")[1]
 					if pres.Type == "unavailable" {
+						pc.PML.Lock()
+						pc.PM[pres.From] = nil
+						pc.PML.Unlock()
 						pc.Me.DestroyUser(chatname)
 						pc.CallFunc(USERQUIT, &Event{
 							Username: chatname,
 						})
+						sent[chatname] = false
 					} else {
-						pc.SendPublicKey(chatname)
-						pc.CallFunc(USERJOIN, &Event{
-							Username: chatname,
-						})
+						if sent[chatname] == false {
+							sent[chatname] = true
+							pc.CallFunc(USERCONNECT, &Event{
+								Username: chatname,
+							})
+						}
 					}
 				case xmpp.Message:
 					msg := i.(xmpp.Message)
 					chatname := strings.Split(msg.From, "/")[1]
-					decrypted, err := pc.Me.ReceiveMessage(chatname, msg.Body)
-					if err != nil {
-						continue
-					}
-					if len(decrypted) != 0 {
-						pc.CallFunc(GROUPMESSAGE, &Event{
-							Username: chatname,
-							Body:     string(decrypted),
-						})
+					if msg.Type == "chat" {
+						pc.HandleOTRMessage(chatname, msg.Body)
+					} else {
+						if msg.X.Composing != nil {
+							pc.CallFunc(COMPOSING, &Event{
+								Username: chatname,
+							})
+						}
+
+						if msg.X.Paused != nil {
+							pc.CallFunc(PAUSED, &Event{
+								Username: chatname,
+							})
+						}
+
+						decrypted, err := pc.Me.ReceiveMessage(chatname, msg.Body)
+						if err != nil {
+							continue
+						}
+						if len(decrypted) != 0 {
+							pc.CallFunc(GROUPMESSAGE, &Event{
+								Username: chatname,
+								Body:     string(decrypted),
+							})
+						}
 					}
 				}
 			}
@@ -333,8 +534,15 @@ func (pc *PhoxyConn) Connect() error {
 							Callback: cb,
 						})
 					}
+				case "unavailable":
+					pc.CallFunc(USERQUIT, &Event{
+						Username: pkt.Nickname,
+					})
+					pc.PML.Lock()
+					pc.PM[pkt.Nickname] = nil
+					pc.PML.Unlock()
 				case "user_join":
-					pc.CallFunc(USERJOIN, &Event{
+					pc.CallFunc(USERCONNECT, &Event{
 						Username: pkt.Nickname,
 					})
 					pc.SendPublicKey(pkt.Nickname)
@@ -353,29 +561,9 @@ func (pc *PhoxyConn) Connect() error {
 						})
 					}
 				case "chat":
-					var cnv *otr.Conversation
-					if cnv = pc.PM[pkt.Nickname]; cnv == nil {
-						cnv = &otr.Conversation{
-							PrivateKey:   pc.OTRKey,
-							Rand:         rand.Reader,
-							FragmentSize: 0,
-						}
-						pc.PM[pkt.Nickname] = cnv
-					}
-					var msg OTRMessage
-					json.Unmarshal([]byte(*pkt.Object), &msg)
-					out, _, _, _, err := cnv.Receive([]byte(msg.Body))
-					if err == nil {
-						pc.CallFunc(PRIVATEMESSAGE, &Event{
-							Username: pkt.Nickname,
-							Body:     string(out),
-						})
-					}
-				case "unavailable":
-					pc.Me.DestroyUser(pkt.Nickname)
-					pc.CallFunc(USERQUIT, &Event{
-						Username: pkt.Nickname,
-					})
+					var msgo2 MessageObject
+					json.Unmarshal([]byte(*pkt.Object), &msgo2)
+					pc.HandleOTRMessage(pkt.Nickname, msgo2.Body)
 				case "ping":
 					pc.Send(Packet{
 						Type: "pong",
@@ -385,70 +573,105 @@ func (pc *PhoxyConn) Connect() error {
 		}()
 	}
 
-	if pc.Opts.Type == BOSH {
-		go func() {
-			c := &bosh.Config{
-				BOSHEndpoint:     pc.Opts.Endpoint,
-				Domain:           "crypto.dog",
-				ConferenceDomain: "conference.crypto.dog",
-				Lobby:            pc.Opts.Chatroom,
-				HumanName:        pc.Opts.Username,
-			}
-
-			err := bosh.NewConversation(c, func(c *bosh.Conn, ev *bosh.XMPPEvent) {
-				pc.BC = c
-				switch ev.Type {
-				case "UserJoin":
-					pc.CallFunc(USERJOIN, &Event{
-						Username: ev.Username,
-					})
-					pc.SendPublicKey(ev.Username)
-				case "UserQuit":
-					pc.CallFunc(USERQUIT, &Event{
-						Username: ev.Username,
-					})
-					pc.Me.DestroyUser(ev.Username)
-				case "GroupchatMessageReceived":
-					if ev.Username == pc.Opts.Username {
-						return
-					}
-					msgb, err := pc.Me.ReceiveMessage(ev.Username, ev.Message)
-					if err != nil {
-						pc.SendPublicKey(ev.Username)
-						return
-					}
-					if msgb != nil {
-						pc.CallFunc(GROUPMESSAGE, &Event{
-							Username: ev.Username,
-							Body:     string(msgb),
-						})
-					}
-				}
-			})
-			if err != nil {
-				pc.Errc <- err
-			}
-		}()
-	}
-
 	return <-pc.Errc
 }
 
+func (pc *PhoxyConn) Close() {
+	if pc.Opts.Type == WS {
+		pc.WS.Disconnect()
+	}
+}
+
+func (pc *PhoxyConn) SendComposing() {
+	if pc.Opts.Type == WS {
+		pc.WS.SendComposing(pc.Opts.Chatroom+"@conference.crypto.dog", "groupchat")
+	}
+}
+
+func (pc *PhoxyConn) SendPaused() {
+	if pc.Opts.Type == WS {
+		pc.WS.SendPaused(pc.Opts.Chatroom+"@conference.crypto.dog", "groupchat")
+	}
+}
+
 func (pc *PhoxyConn) CallFunc(typ HandlerField, msg *Event) {
-	if typ == USERJOIN && pc.AlreadyJoined[msg.Username] == true {
+	if msg.Username == pc.Opts.Username {
+		return
+	}
+	pc.asLock.Lock()
+	as := pc.userJoinSent[msg.Username]
+	pc.asLock.Unlock()
+
+	if typ == USERCONNECT {
+		if pc.allIsWell && as == false {
+			pc.userJoinSent[msg.Username] = true
+			pc.waitUntilAuth(msg.Username, func() {
+				pc.CallFunc(USERJOIN, &Event{
+					Username: msg.Username,
+				})
+			})
+		}
+
+		if pc.init == false {
+			pc.init = true
+			go func() {
+				pc.SendPublicKey("")
+				pc.Me.RequestPublicKey("")
+			}()
+
+			go func() {
+				txa := make(map[string]int64)
+
+				for x := 0; x < 512; x++ {
+					ok := false
+					time.Sleep(200 * time.Millisecond)
+					for k, _ := range pc.AlreadyJoined {
+						if txa[k] > 12 {
+							continue
+						}
+						if pc.Me.FP(k) == "" {
+							ok = false
+							txa[k]++
+							pc.Me.RequestPublicKey(k)
+							break
+						} else {
+							ok = true
+						}
+					}
+
+					if ok {
+						pc.CallFunc(JOINED, new(Event))
+						pc.allIsWell = true
+						break
+					}
+				}
+			}()
+		}
+	}
+
+	if typ == USERCONNECT && pc.AlreadyJoined[msg.Username] == true {
 		return
 	} else {
 		pc.AlreadyJoined[msg.Username] = true
 	}
 
 	if typ == USERQUIT {
+		pc.userJoinSent[msg.Username] = false
 		pc.AlreadyJoined[msg.Username] = false
 	}
 
 	msg.Type = typ
 	msg.At = time.Now().UnixNano()
-	if pc.interceptor != nil {
-		pc.interceptor(msg)
+	if pc.interceptor != nil && typ != USERCONNECT {
+		if msg.Body != "+ping" || msg.Body != "+pong" {
+			if typ == GROUPMESSAGE || typ == PRIVATEMESSAGE {
+				if len(msg.Body) < 1024 {
+					pc.interceptor(msg)
+				}
+			} else {
+				pc.interceptor(msg)
+			}
+		}
 	}
 
 	if h := pc.Handlers[typ]; h != nil {
@@ -472,36 +695,16 @@ func (pc *PhoxyConn) HandleFunc(typ HandlerField, h HandlerFunc) {
 	pc.Handlers[typ] = &h
 }
 
-func (pc *PhoxyConn) GroupMessage(body string) {
-	if pc.Opts.Type == BOSH {
-		if pc.BC != nil {
-			pc.BC.SendGroupMessage(pc.Me.SendMessage([]byte(body)))
-		}
-		return
-	}
-
+func (pc *PhoxyConn) SendRawGroupMessage(body string) {
 	if pc.Opts.Type == WS {
 		if pc.WS != nil {
-			pc.WS.SendMessage(pc.Opts.Chatroom+"@conference.crypto.dog", "groupchat", pc.Me.SendMessage([]byte(body)))
+			pc.WS.SendMessage(pc.Opts.Chatroom+"@conference.crypto.dog", "groupchat", body)
 		}
-		return
 	}
+}
 
-	enc := MessageObject{
-		Type: "message",
-		Body: body,
-	}
-	dat, _ := json.Marshal(enc)
-	msg := pc.Me.SendMessage(dat)
-
-	if pc.Opts.Type == PHOXY {
-		h := json.RawMessage(msg)
-		pc.Send(Packet{
-			Type:     "groupchat",
-			Chatroom: pc.Opts.Chatroom,
-			Object:   &h,
-		})
-	}
+func (pc *PhoxyConn) GroupMessage(body string) {
+	pc.Me.SendMessage([]byte(body))
 }
 
 func (pc *PhoxyConn) Groupf(body string, args ...interface{}) {
@@ -692,9 +895,7 @@ func (pc *PhoxyConn) Disconnect() {
 		pc.Conn.Close()
 	}
 
-	if pc.Opts.Type == BOSH {
-		if pc.BC != nil {
-			pc.BC.Disconnect()
-		}
+	if pc.Opts.Type == WS {
+		pc.WS.Disconnect()
 	}
 }

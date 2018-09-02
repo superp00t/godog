@@ -2,3 +2,4 @@ godog
 irc_gateway/irc_gateway 
 adminui
 spam.json
+deploy.sh

@@ -3,6 +3,7 @@ package xmpp
 import (
 	"bytes"
 	"encoding/xml"
+	"errors"
 	"fmt"
 	"html/template"
 	"net/url"
@@ -12,14 +13,16 @@ import (
 )
 
 const (
-	OpenStanza        = "<open xmlns='urn:ietf:params:xml:ns:xmpp-framing' to='{{.Host}}' version='1.0'/>"
-	AuthStanza        = "<auth xmlns='urn:ietf:params:xml:ns:xmpp-sasl' mechanism='ANONYMOUS'/>"
-	BindStanza        = "<iq type='set' id='_bind_auth_2' xmlns='jabber:client'><bind xmlns='urn:ietf:params:xml:ns:xmpp-bind'/></iq>"
-	SessStanza        = "<iq type='set' id='_session_auth_2' xmlns='jabber:client'><session xmlns='urn:ietf:params:xml:ns:xmpp-session'/></iq>"
-	JoinMucStanza     = "<presence from='{{.JID}}' to='{{.MUCJID}}' xmlns='jabber:client'><x xmlns='http://jabber.org/protocol/muc'/></presence>"
-	JoinMucStanza2    = "<presence from='{{.JID}}' to='{{.MUCJID}}' xmlns='jabber:client'><show/><status/></presence>"
-	SendMessageStanza = "<message to='{{.Recipient}}' from='{{.JID}}' type='{{.Type}}' xmlns='jabber:client'><body xmlns='jabber:client'>{{.Body}}</body><x xmlns='jabber:x:event'><active/></x></message>"
-	KickUserStanza    = `<iq from='{{.JID}}' id='kick1' to='{{.MUCJID}}' type='set'><query xmlns='http://jabber.org/protocol/muc#admin'><item nick='{{.Nick}}' role='none'><reason>{{.Reason}}</reason></item></query></iq>`
+	OpenStanza          = "<open xmlns='urn:ietf:params:xml:ns:xmpp-framing' to='{{.Host}}' version='1.0'/>"
+	AuthStanza          = "<auth xmlns='urn:ietf:params:xml:ns:xmpp-sasl' mechanism='ANONYMOUS'/>"
+	BindStanza          = "<iq type='set' id='_bind_auth_2' xmlns='jabber:client'><bind xmlns='urn:ietf:params:xml:ns:xmpp-bind'/></iq>"
+	SessStanza          = "<iq type='set' id='_session_auth_2' xmlns='jabber:client'><session xmlns='urn:ietf:params:xml:ns:xmpp-session'/></iq>"
+	JoinMucStanza       = "<presence from='{{.JID}}' to='{{.MUCJID}}' xmlns='jabber:client'><x xmlns='http://jabber.org/protocol/muc'/></presence>"
+	JoinMucStanza2      = "<presence from='{{.JID}}' to='{{.MUCJID}}' xmlns='jabber:client'><show/><status/></presence>"
+	SendMessageStanza   = "<message to='{{.Recipient}}' from='{{.JID}}' type='{{.Type}}' xmlns='jabber:client'><body xmlns='jabber:client'>{{.Body}}</body><x xmlns='jabber:x:event'><active/></x></message>"
+	SendComposingStanza = "<message to='{{.Recipient}}' from='{{.JID}}' type='{{.Type}}' id='composing' xmlns='jabber:client'><body/><x xmlns='jabber:x:event'><composing xmlns='http://jabber.org/protocol/chatstates'/></x></message>"
+	SendPausedStanza    = "<message to='{{.Recipient}}' from='{{.JID}}' type='{{.Type}}' id='paused' xmlns='jabber:client'><body/><x xmlns='jabber:x:event'><paused xmlns='http://jabber.org/protocol/chatstates'/></x></message>"
+	KickUserStanza      = `<iq from='{{.JID}}' id='kick1' to='{{.MUCJID}}' type='set'><query xmlns='http://jabber.org/protocol/muc#admin'><item nick='{{.Nick}}' role='none'><reason>{{.Reason}}</reason></item></query></iq>`
 )
 
 type Presence struct {
@@ -27,6 +30,7 @@ type Presence struct {
 	From     string `xml:"from,attr"`
 	To       string `xml:"to,attr"`
 	Type     string `xml:"type,attr"`
+	Error    *Error `xml:"error"`
 }
 
 type Message struct {
@@ -41,7 +45,8 @@ type Message struct {
 }
 
 type Error struct {
-	Code int `xml:"code"`
+	Code int    `xml:"code"`
+	Text string `xml:"text"`
 }
 type Event struct {
 	Composing *string `xml:"composing"`
@@ -78,12 +83,18 @@ type Opts struct {
 	Username, Password string
 	Debug              bool
 	Nick               string
+	Proxy              string
 }
 
 type Client struct {
 	JID  string
 	Opts Opts
 	Sock ws.Conn
+}
+
+func (c *Client) Disconnect() {
+	c.Sock.Send(`<close xmlns="urn:ietf:params:xml:ns:xmpp-framing" />`)
+	c.Sock.Close()
 }
 
 func (s Stanza) Render(st string) string {
@@ -110,7 +121,7 @@ func (o Opts) Connect() (*Client, error) {
 	u.Scheme = "https"
 	u.Path = "/"
 
-	c, err := ws.DialConn(o.WSURL)
+	c, err := ws.DialConn(o.WSURL, o.Proxy)
 	if err != nil {
 		return nil, err
 	}
@@ -191,7 +202,11 @@ func (c *Client) Recv() (interface{}, error) {
 		pres.Presence = xml.Name{Local: "presence", Space: "jabber:client"}
 		xml.Unmarshal([]byte(str), &pres)
 		if pres.Type == "error" {
-			return nil, fmt.Errorf("Username already taken")
+			if c.Opts.Debug {
+				fmt.Println(str)
+			}
+			fmt.Printf("Unexpected error: '%s'\n", pres.Error.Text)
+			return nil, fmt.Errorf("%d %s", pres.Error.Code, pres.Error.Text)
 		}
 		return pres, nil
 	}
@@ -201,7 +216,11 @@ func (c *Client) Recv() (interface{}, error) {
 		msg.Message = xml.Name{Local: "message", Space: "jabber:client"}
 		xml.Unmarshal([]byte(str), &msg)
 		if msg.Type == "error" {
-			return nil, fmt.Errorf("Username already taken")
+			if msg.Error.Text == "Traffic rate limit is exceeded" {
+				fmt.Println("RATE LIMIT")
+				return "", nil
+			}
+			return nil, errors.New(msg.Error.Text)
 		}
 		return msg, nil
 	}
@@ -216,6 +235,22 @@ func (c *Client) SendMessage(jid, typeof, body string) {
 		Body:      body,
 		JID:       c.JID,
 	}.Render(SendMessageStanza))
+}
+
+func (c *Client) SendComposing(jid, typeof string) {
+	c.send(Stanza{
+		Recipient: jid,
+		Type:      typeof,
+		JID:       c.JID,
+	}.Render(SendComposingStanza))
+}
+
+func (c *Client) SendPaused(jid, typeof string) {
+	c.send(Stanza{
+		Recipient: jid,
+		Type:      typeof,
+		JID:       c.JID,
+	}.Render(SendPausedStanza))
 }
 
 func (c *Client) Kick(lobby, nick, reason string) error {

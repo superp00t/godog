@@ -4,35 +4,17 @@
 
 This is a general-purpose API for writing programs that interact with Cryptodog.
 
-It can speak two protocols: Phoxy (developed by yours truly) and BOSH-XMPP, which is terrible and slow but still in use by many people. 
-
 The multiparty implementation has been mostly a line-by-line translation from Cryptodog's, with some help from the protocol spec. However, I cannot guarantee that it is a safe one.
-
-An example bot is included in this directory.
 ```
 $ go get -u github.com/superp00t/godog
 $ $GOPATH/bin/godog -a [phoxy api key]
 ```
 
 ## API usage
-### Connection (Standard XMPP Protocol)
-```go
-
-opts := phoxy.Opts {
-    Type:     phoxy.BOSH,
-    Username: "username",
-    Chatroom: "lobby",
-    Endpoint: "https://crypto.dog/http-bind/",
-}
-
-conn, err := phoxy.New(&opts)
-if err != nil {
-    // handle err
-}
-```
-
 ### Connection (Phoxy WebSocket Protocol) 
 ```go
+
+import "github.com/superp00t/godog/phoxy"
 
 opts := phoxy.Opts {
     Type:     phoxy.PHOXY,
@@ -52,6 +34,10 @@ if err != nil {
 ```go
 conn.HandleFunc(phoxy.USERJOIN, func(ev *phoxy.Event) {
     conn.Groupf("Greetings, %s!", ev.Username)
+})
+
+conn.HandleFunc(phoxy.USERQUIT, func(ev *phoxy.Event) {
+    conn.Groupf("Auf Wiedersehen, %s!", ev.Username)
 })
 
 // Echo in all caps
